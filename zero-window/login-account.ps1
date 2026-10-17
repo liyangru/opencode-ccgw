@@ -8,11 +8,15 @@
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File zero-window\login-account.ps1 -Name acct2
 #   powershell -ExecutionPolicy Bypass -File zero-window\login-account.ps1 -Name acct2 -Target opencode
+#   powershell -ExecutionPolicy Bypass -File zero-window\login-account.ps1 -Name acct2 -Method device
 #   (-Target "" opens the interactive integration picker instead)
+#   (-Method device|key is required when running without an interactive terminal:
+#    device = print code + link, approve in browser; key = paste an API key)
 [CmdletBinding()]
 param(
   [Parameter(Mandatory = $true)][string]$Name,
   [string]$Target = "opencode",
+  [string]$Method = "",
   [string]$CliPath = ""
 )
 $ErrorActionPreference = "Stop"
@@ -52,10 +56,12 @@ Write-Host ""
 # --standalone: run a private server with this environment instead of talking
 # to the desktop app's background service (which would write to the main
 # profile instead of this account's).
+$mArgs = @()
+if ($Method) { $mArgs = @("--method", $Method) }
 if ($Target) {
-  & $CliPath auth login --standalone $Target
+  & $CliPath auth login --standalone @mArgs $Target
 } else {
-  & $CliPath auth login --standalone
+  & $CliPath auth login --standalone @mArgs
 }
 
 Write-Host ""

@@ -73,6 +73,7 @@ zero-window\stop.cmd       # 停止(并禁用自启)
 powershell -ExecutionPolicy Bypass -File zero-window\add-account.ps1 -Name acct2
 
 # 2) 浏览器登录该账户(一次性;--standalone 保证凭据写进它的隔离 profile)
+#    无交互终端时加 -Method device(打印设备码+链接,浏览器确认即可;key 则贴 API key)
 powershell -ExecutionPolicy Bypass -File zero-window\login-account.ps1 -Name acct2
 
 # 3) 重启网关,加载账户池
