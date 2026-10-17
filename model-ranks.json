@@ -1,0 +1,15 @@
+{
+  "$comment": "ccgw free-model preference order, best -> worst. Free models are auto-discovered from the accounts' live catalogs (cost 0/0 or a -free suffix); anything not listed here is appended automatically after this list. Edit freely - the gateway hot-reloads this file within a minute. Keep in sync with DEFAULT_ORDER in ranking.mjs (this file wins).",
+  "order": [
+    "deepseek-v4.1-flash-free",
+    "glm-5.3-flash-free",
+    "beam-free",
+    "nemotron-3.5-super-vl-free",
+    "longcat-2.5-preview-free",
+    "nemotron-3-ultra-free",
+    "mimo-v2.6-flash-free",
+    "space-bunny-free",
+    "nemotron-3.5-lightning-free",
+    "big-pickle"
+  ]
+}

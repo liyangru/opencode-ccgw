@@ -98,6 +98,16 @@ Stop-ScheduledTask ccgw-gateway -ErrorAction SilentlyContinue; Start-ScheduledTa
 - 限流究竟按账户还是按 IP/设备判定取决于上游:**当前观察证据是"出口 IP 是主开关"**——同一出口 IP 被点名时,池内各实例 25 秒内接连被拒(实测 2026-10;当时本机只有 1 个账号的登录、其余为匿名实例——**不论实例/凭据/是否登录,同一 IP 一律被拒**),换回干净 IP 立即恢复。所以多账户的价值是"干净 IP 上的负载分摊",救不了 IP 级封禁;封禁靠下面的出口切换解决。
 - **实例 ≠ 账号**:`pool.total` / `pool.loggedIn` / `pool.anonymous` 分别是"实例数 / 已登录实例数 / 匿名实例数"——一个账号可以登录多个实例,**额度不会叠加**;未登录实例(如某个还没登录的新实例)以匿名身份承接请求,能分担并发但没有独立额度。要真正的多账户摊薄,每个实例必须登录**不同的账号**——看 `pool.distinctAccounts`(按 `email` 去重的账号数)。
 
+## 免费模型:自动发现 + 排名 + 选优
+
+网关自动从账户实例的实时目录里识别**免费模型**——判据取自上游元数据本身(`cost = 0/0`,或名字带 `-free` 后缀;`big-pickle` 这类无后缀的免费模型也能自动认出),按仓库根目录的 `model-ranks.json` 从强到弱排序,新出现的免费模型自动补到列表尾部(无需改代码;该文件热生效,约一分钟内刷新)。
+
+- **自动选优**:客户端请求的模型名只要是免费模型就直接用;**未知 / 付费目录 / 占位模型名**(如 `claude-sonnet-5-5`、`sonnet`、空)一律自动改用**排名第一**的免费模型——不会再出现"付费名透传 → 免费号必然报错 → 账号误冷却"的连锁;别名 `auto` / `best` / `best-free` / `ccgw-auto` / `free-auto` 等价于"用第一"。
+- `GET /v1/models` 只列**免费模型**且按排名顺序,客户端模型选择器里不再混入用不了的付费目录。
+- `GET /health` 的 `freeRanked` = 当前完整排名(另有 `defaultModel` / `modelPin`);每次请求日志带 `model` + `modelSource`(`requested` / `alias` / `not-free` / `top-free` / `default` / `static`)。
+- 想固定模型:`CCGW_MODEL=glm-5.3-flash-free`(须在免费列表内);想改排名:编辑 `model-ranks.json`;自检:`node test-ranking.mjs`。
+- 默认排名(2026-10,10 个免费模型,好 → 差):`deepseek-v4.1-flash-free` → `glm-5.3-flash-free` → `beam-free` → `nemotron-3.5-super-vl-free` → `longcat-2.5-preview-free` → `nemotron-3-ultra-free` → `mimo-v2.6-flash-free` → `space-bunny-free` → `nemotron-3.5-lightning-free` → `big-pickle`。
+
 ## 全池限流 → 自动切换出口(备用 VPN:WARP / Nord / VPN Gate)
 
 若免费层限额按 IP 判定,加账户救不回;**所有实例同时因限流冷却**就是这个信号。ccgw 把它暴露为 `/health` 的 `pool` 对象(`total`=实例数、`loggedIn`=已登录实例数、`anonymous`=匿名实例数、`distinctAccounts`=不同账号数、`cooling`、`quotaExhausted`),`zero-window\net-guard.ps1` 常驻监听并自动切换备用出口。
@@ -208,7 +218,7 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
   ```
 
   OpenAI 风格把路径换成 `/v1/chat/completions`(或 `/v1/responses`);认证支持 `x-api-key: <token>`、`Authorization: Bearer <token>`、Basic `opencode:<token>`。
-- 额度共享:所有人吃同一个免费账户池;单账户限流自动绕开,全池限流时守卫自动切出口(WARP);模型名不匹配时自动落到默认免费模型。
+- 额度共享:所有人吃同一个免费账户池;单账户限流自动绕开,全池限流时守卫自动切出口(WARP);任意模型名(含付费名/占位名)自动解析为排名第一的免费模型——见「免费模型:自动发现 + 排名 + 选优」。
 
 ## 端点
 
@@ -218,8 +228,8 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 | POST | `/v1/messages/count_tokens` | 本地估算(Claude Code 会用) |
 | POST | `/v1/chat/completions` | OpenAI Chat Completions(流式、工具) |
 | POST | `/v1/responses` | OpenAI Responses / Codex(流式、函数调用) |
-| GET | `/v1/models` | 免费模型列表(带 `anthropic-version` 头返回 Anthropic 形状,否则 OpenAI 形状) |
-| GET | `/health` | 状态 + 账户池(连接/冷却/登录身份)+ `pool` 全池限流信号 + 模型列表 |
+| GET | `/v1/models` | 免费模型列表,按排名顺序(带 `anthropic-version` 头返回 Anthropic 形状,否则 OpenAI 形状) |
+| GET | `/health` | 状态 + 账户池(连接/冷却/登录身份)+ `pool` 全池限流信号 + 模型目录 + `freeRanked` 免费模型排名(`defaultModel` / `modelPin`) |
 
 ## 环境变量
 
@@ -227,7 +237,7 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 |---|---|---|
 | `CCGW_PORT` | `8317` | 监听端口 |
 | `CCGW_HOST` | `127.0.0.1` | 监听地址(仅本机) |
-| `CCGW_MODEL` | `deepseek-v4.1-flash-free` | 默认模型(不匹配已知免费模型时使用) |
+| `CCGW_MODEL` | 空(自动) | 固定模型 pin(可选,须在免费列表内)。空 = 自动选排名第一的免费模型 |
 | `CCGW_TOKEN` | 空 | 访问口令。本机直连(回环、无转发头)免校验;隧道/局域网等远端来源必须带 `Authorization: Bearer <token>` 或 `x-api-key: <token>`(或 Basic `opencode:<token>`) |
 | `CCGW_SCRATCH` | `%TEMP%\ccgw-scratch` | 会话 location / 桥接注册目录(被清理后自动重建) |
 | `CCGW_MAX_CONCURRENCY` | `3` | 并发回合上限(排队) |
@@ -244,12 +254,13 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 
 - `node smoke1.mjs` — 引擎冒烟(文本回合 + 工具捕获/中断)。
 - `node test-formats.mjs [anthropic|openai|responses|real]` — 全链路验收:三协议 ×(非流式 / 流式 / 工具往返),外加 `real` 组:模拟客户端**真实读取文件、真实执行命令**(输出含一次性 token,最终回答必须包含它们)。
+- `node test-ranking.mjs` — 免费模型识别 / 排名 / 自动选优自检。
 - `node verify-live.mjs` — 对运行中的网关做健康 + 文本 + 工具往返快速验证。
 - `ccgw.log` — 每请求一行 JSON,路由证明 = `sessionID`(可在 OpenCode 桌面版里打开对应会话)。
 
 ## 工作原理
 
-1. 解析客户端请求 → 规范化(canonical)消息 + 工具定义。
+1. 解析客户端请求 → 规范化(canonical)消息 + 工具定义;模型名解析:免费模型直用,未知 / 付费 / `auto` → 排名第一的免费模型。
 2. 若有工具:生成唯一桥接名 `gw<随机>` 与清单文件,`PUT /api/experimental/mcp/<name>` 注册 stdio MCP 桥接(`codemode:false`,工具直接暴露);等待其 `connected` 且位置工具目录完成重建(`command.updated` 事件)——这是"工具找不到"问题的根因修复。
 3. 创建一次性 OpenCode 会话:权限 `[deny *, allow read, allow <bridge>_*]`。
 4. 把系统提示 + 历史(含既往工具调用/结果,工具名改写为当前桥接名)渲染为单个提示,`POST /api/session/<id>/prompt`。

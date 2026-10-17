@@ -42,7 +42,6 @@ import {
   parseResponses,
   applyToolChoice,
   renderPrompt,
-  resolveModel,
   anthropicNonStream,
   openaiNonStream,
   responsesNonStream,
@@ -53,12 +52,14 @@ import {
   modelsOpenAI,
   countTokensApprox,
 } from "./formats.mjs"
+import { isFreeModel, loadRankOrder, pickModel, rankFree } from "./ranking.mjs"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 const PORT = Number(process.env.CCGW_PORT || 8317)
 const HOST = process.env.CCGW_HOST || "127.0.0.1"
-const FALLBACK_MODEL = process.env.CCGW_MODEL || "deepseek-v4.1-flash-free"
+const PIN = process.env.CCGW_MODEL || "" // optional explicit model pin; empty = auto (top-ranked free)
+const FALLBACK_MODEL = "deepseek-v4.1-flash-free" // last resort when no free model list is known
 const SCRATCH = process.env.CCGW_SCRATCH || path.join(os.tmpdir(), "ccgw-scratch")
 const LOG_FILE = process.env.CCGW_LOG || path.join(__dirname, "ccgw.log")
 const TOKEN = process.env.CCGW_TOKEN || ""
@@ -185,7 +186,12 @@ async function accountModels(a) {
     a.modelCache = {
       at: Date.now(),
       ids: data.map((m) => m.id),
-      list: data.map((m) => ({ id: m.id, name: m.name || m.id, providerID: m.providerID || "opencode" })),
+      list: data.map((m) => ({
+        id: m.id,
+        name: m.name || m.id,
+        providerID: m.providerID || "opencode",
+        free: m.enabled !== false && isFreeModel(m.id, m),
+      })),
     }
   } catch (e) {
     console.log("[ccgw] " + a.name + ": model list fetch failed:", e.message)
@@ -196,17 +202,20 @@ async function accountModels(a) {
 // Union of every account's model list (in practice the lists are identical;
 // the union keeps routing correct while accounts are cooling down or booting).
 async function knownModels() {
-  const ids = new Set()
-  const list = []
+  const byId = new Map()
   for (const a of accounts) {
     const c = await accountModels(a)
     for (const m of c.list) {
-      if (ids.has(m.id)) continue
-      ids.add(m.id)
-      list.push(m)
+      const prev = byId.get(m.id)
+      if (prev) {
+        prev.free = prev.free || m.free
+        continue
+      }
+      byId.set(m.id, { ...m })
     }
   }
-  return { ids: [...ids], list }
+  const list = [...byId.values()]
+  return { ids: list.map((m) => m.id), list }
 }
 
 // ---------------------------------------------------------------------------
@@ -362,7 +371,10 @@ async function handleTurn({ dialect, body, req, res }) {
   applyToolChoice(canon, body.tool_choice)
 
   const models = await knownModels()
-  const model = resolveModel(canon.model, models.ids, FALLBACK_MODEL)
+  const ranked = rankFree(models.list, loadRankOrder())
+  const freeSet = new Set(models.list.filter((m) => m.free).map((m) => m.id))
+  const pick = pickModel({ requested: canon.model, ids: new Set(models.ids), freeSet, ranked, pin: PIN, fallback: FALLBACK_MODEL })
+  const model = pick.model
   const inputTokens = countTokensApprox(canon)
 
   let bridgeName = null
@@ -495,7 +507,7 @@ async function handleTurn({ dialect, body, req, res }) {
   const durationMs = Date.now() - t0
   if (error || result?.error) {
     const message = String(error?.message || result?.error?.message || "turn failed")
-    logLine({ reqId, account: account?.name, dialect, requestedModel: canon.model, model, stream: canon.stream, tools: canon.tools.length, bridge: bridgeName, sessionID: sid, durationMs, error: message })
+    logLine({ reqId, account: account?.name, dialect, requestedModel: canon.model, model, modelSource: pick.source, stream: canon.stream, tools: canon.tools.length, bridge: bridgeName, sessionID: sid, durationMs, error: message })
     if (stream) {
       stream.fail(error || new Error(message))
       res.end()
@@ -512,6 +524,7 @@ async function handleTurn({ dialect, body, req, res }) {
     dialect,
     requestedModel: canon.model,
     model,
+    modelSource: pick.source,
     stream: canon.stream,
     tools: canon.tools.length,
     bridge: bridgeName,
@@ -545,12 +558,15 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "GET" && (p === "/health" || p === "/")) {
       const models = await knownModels()
+      const ranked = rankFree(models.list, loadRankOrder())
       return json(res, 200, {
         ok: true,
         opencode: accounts[0].client.baseUrl,
         eventStream: accounts[0].client.connected,
         models: models.ids,
-        defaultModel: FALLBACK_MODEL,
+        freeRanked: ranked,
+        modelPin: PIN || null,
+        defaultModel: PIN && models.ids.includes(PIN) ? PIN : ranked[0] || FALLBACK_MODEL,
         scratch: SCRATCH,
         accounts: accounts.map((a) => ({
           name: a.name,
@@ -569,9 +585,12 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "GET" && p === "/v1/models") {
       const models = await knownModels()
+      const ranked = rankFree(models.list, loadRankOrder())
+      const byId = new Map(models.list.map((m) => [m.id, m]))
+      const freeList = ranked.map((id) => byId.get(id)).filter(Boolean)
       const now = Math.floor(Date.now() / 1000)
       const wantsAnthropic = !!req.headers["anthropic-version"] || url.searchParams.get("format") === "anthropic"
-      return json(res, 200, wantsAnthropic ? modelsAnthropic(models.list, now) : modelsOpenAI(models.list, now))
+      return json(res, 200, wantsAnthropic ? modelsAnthropic(freeList, now) : modelsOpenAI(freeList, now))
     }
 
     if (!authed(req)) return json(res, 401, errorShape(p.includes("messages") ? "anthropic" : "openai", "unauthorized", 401))
@@ -608,7 +627,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   console.log("[ccgw] listening on http://" + HOST + ":" + PORT)
   console.log("[ccgw] scratch:", SCRATCH)
-  console.log("[ccgw] default model:", FALLBACK_MODEL)
+  console.log("[ccgw] model selection: top-ranked free" + (PIN ? " (pinned: " + PIN + ")" : " (auto)"))
   console.log("[ccgw] log:", LOG_FILE)
 })
 
