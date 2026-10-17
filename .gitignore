@@ -8,6 +8,7 @@ ccswitch-links.txt
 zero-window/headless-service.json
 zero-window/serve.vbs
 zero-window/gateway.vbs
+zero-window/tunnel.vbs
 
 # multi-account provisioning (machine-local: paths, passwords, profiles)
 zero-window/accounts.json

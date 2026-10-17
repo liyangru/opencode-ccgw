@@ -335,6 +335,13 @@ function errorShape(dialect, message, status = 500) {
 
 function authed(req) {
   if (!TOKEN) return true
+  // Local, direct requests stay key-free so this machine's own clients keep
+  // working. Traffic carrying forwarding headers (cloudflared tunnel, reverse
+  // proxies) counts as remote even though it lands on loopback.
+  const remote = req.socket.remoteAddress || ""
+  const local = remote === "127.0.0.1" || remote === "::1" || remote === "::ffff:127.0.0.1"
+  const forwarded = req.headers["cf-connecting-ip"] || req.headers["x-forwarded-for"]
+  if (local && !forwarded) return true
   const auth = req.headers["authorization"] || ""
   const xk = req.headers["x-api-key"] || ""
   return auth === "Bearer " + TOKEN || xk === TOKEN || auth === "Basic " + Buffer.from("opencode:" + TOKEN).toString("base64")
@@ -534,6 +541,8 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, "http://localhost")
   const p = url.pathname
   try {
+    if (!authed(req)) return json(res, 401, errorShape(p.includes("messages") ? "anthropic" : "openai", "unauthorized", 401))
+
     if (req.method === "GET" && (p === "/health" || p === "/")) {
       const models = await knownModels()
       return json(res, 200, {

@@ -141,7 +141,7 @@ Stop-ScheduledTask ccgw-gateway -ErrorAction SilentlyContinue; Start-ScheduledTa
 |---|---|
 | API 端点 (base_url) | `http://127.0.0.1:8317`(不要带 `/v1`) |
 | 上游格式 | **Anthropic Messages(原生)** |
-| API Key | 任意非空值(网关默认不校验) |
+| API Key | 本机直连:任意非空值(不校验);从隧道/局域网访问时必须填口令(见「共享给朋友」) |
 | 模型 | 任意名字(如 `claude-sonnet-5`);不匹配免费模型 ID 时自动路由到默认模型 |
 
 手工配置等价于:`ANTHROPIC_BASE_URL=http://127.0.0.1:8317`、`ANTHROPIC_AUTH_TOKEN=local`。
@@ -180,6 +180,29 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 
 `base_url = http://127.0.0.1:8317/v1`,key 任意。
 
+### 共享给朋友(零客户端安装 + 免费公网地址)
+
+网关可同时给多台设备/朋友使用,他们不需要安装任何东西——在任意支持自定义 API 地址的工具(或纯 curl / SDK)里填 **地址 + 口令** 即可。账户轮换、全池限流自动切出口(WARP)等机制对所有请求一视同仁。
+
+- 公网入口 = 免费隧道 [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)(免账号、免公网 IP)。已注册计划任务 `ccgw-tunnel`(随登录自启):
+
+  ```powershell
+  cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8317 --logfile zero-window\tunnel.log
+  ```
+
+  取址:`zero-window\tunnel.log` 里的 `https://<随机名>.trycloudflare.com`。重启隧道进程后地址会变;要固定域名需注册一个免费 Cloudflare 账号做命名隧道。
+- 口令:随机串写在 `zero-window\gateway.vbs` 的 `CCGW_TOKEN`(见「环境变量」;本机客户端不受影响)。
+- 朋友端示例(把 `<url>`、`<token>` 换成实际值):
+
+  ```bash
+  curl <url>/v1/messages \
+    -H "content-type: application/json" -H "x-api-key: <token>" \
+    -d '{"model":"claude-sonnet-5","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}'
+  ```
+
+  OpenAI 风格把路径换成 `/v1/chat/completions`(或 `/v1/responses`);认证支持 `x-api-key: <token>`、`Authorization: Bearer <token>`、Basic `opencode:<token>`。
+- 额度共享:所有人吃同一个免费账户池;单账户限流自动绕开,全池限流时守卫自动切出口(WARP);模型名不匹配时自动落到默认免费模型。
+
 ## 端点
 
 | 方法 | 路径 | 说明 |
@@ -198,7 +221,7 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 | `CCGW_PORT` | `8317` | 监听端口 |
 | `CCGW_HOST` | `127.0.0.1` | 监听地址(仅本机) |
 | `CCGW_MODEL` | `deepseek-v4.1-flash-free` | 默认模型(不匹配已知免费模型时使用) |
-| `CCGW_TOKEN` | 空 | 设置后要求 `Authorization: Bearer <token>` 或 `x-api-key` |
+| `CCGW_TOKEN` | 空 | 访问口令。本机直连(回环、无转发头)免校验;隧道/局域网等远端来源必须带 `Authorization: Bearer <token>` 或 `x-api-key: <token>`(或 Basic `opencode:<token>`) |
 | `CCGW_SCRATCH` | `%TEMP%\ccgw-scratch` | 会话 location / 桥接注册目录(被清理后自动重建) |
 | `CCGW_MAX_CONCURRENCY` | `3` | 并发回合上限(排队) |
 | `CCGW_TURN_TIMEOUT` | `180000` | 单回合超时(ms) |
