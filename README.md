@@ -184,13 +184,20 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 
 网关可同时给多台设备/朋友使用,他们不需要安装任何东西——在任意支持自定义 API 地址的工具(或纯 curl / SDK)里填 **地址 + 口令** 即可。账户轮换、全池限流自动切出口(WARP)等机制对所有请求一视同仁。
 
-- 公网入口 = 免费隧道 [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)(免账号、免公网 IP)。已注册计划任务 `ccgw-tunnel`(随登录自启):
+- 公网入口 = 两条免费隧道并存(都转发本地 `http://127.0.0.1:8317`,同一口令):
+
+  | 隧道 | 地址 | 说明 |
+  |---|---|---|
+  | **ngrok 固定域名**(推荐发给朋友) | **`https://bronco-rewrap-january.ngrok-free.dev`** | 永久不变;计划任务 `ccgw-tunnel-ngrok`(随登录自启);免费额度 2 万请求/月、1 GB 流量/月 |
+  | cloudflared 快速隧道(备用) | `zero-window\tunnel.log` 里的 `https://<随机名>.trycloudflare.com` | 免账号但重启后会换址;计划任务 `ccgw-tunnel` |
+
+  ngrok 固定域名的等价命令(运行器是 `zero-window\tunnel-ngrok.vbs`,机器本地生成、不入库):
 
   ```powershell
-  cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8317 --logfile zero-window\tunnel.log
+  ngrok http 8317 --url https://bronco-rewrap-january.ngrok-free.dev --log zero-window\ngrok-tunnel.log
   ```
 
-  取址:`zero-window\tunnel.log` 里的 `https://<随机名>.trycloudflare.com`。重启隧道进程后地址会变;要固定域名需注册一个免费 Cloudflare 账号做命名隧道。
+  > ngrok 免费版的域名注册时由系统分配(`*.ngrok-free.dev`,不可自定义);浏览器直接访问会先看到 ngrok 提示页,API/SDK/curl 客户端不受影响。
 - 口令:随机串写在 `zero-window\gateway.vbs` 的 `CCGW_TOKEN`(见「环境变量」;本机客户端不受影响)。
 - 朋友端示例(把 `<url>`、`<token>` 换成实际值):
 

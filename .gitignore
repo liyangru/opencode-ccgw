@@ -9,6 +9,7 @@ zero-window/headless-service.json
 zero-window/serve.vbs
 zero-window/gateway.vbs
 zero-window/tunnel.vbs
+zero-window/tunnel-ngrok.vbs
 
 # multi-account provisioning (machine-local: paths, passwords, profiles)
 zero-window/accounts.json
