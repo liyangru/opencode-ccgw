@@ -52,7 +52,7 @@ import {
   modelsOpenAI,
   countTokensApprox,
 } from "./formats.mjs"
-import { isFreeModel, loadRankOrder, pickModel, rankFree } from "./ranking.mjs"
+import { describeRanked, isFreeModel, loadRankConfig, pickModel, rankFree } from "./ranking.mjs"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -191,6 +191,8 @@ async function accountModels(a) {
         name: m.name || m.id,
         providerID: m.providerID || "opencode",
         free: m.enabled !== false && isFreeModel(m.id, m),
+        input: Array.isArray(m.capabilities?.input) ? m.capabilities.input : null,
+        context: m.limit?.context || null,
       })),
     }
   } catch (e) {
@@ -209,6 +211,9 @@ async function knownModels() {
       const prev = byId.get(m.id)
       if (prev) {
         prev.free = prev.free || m.free
+        if (Array.isArray(prev.input) && Array.isArray(m.input)) prev.input = [...new Set([...prev.input, ...m.input])]
+        else if (!prev.input && m.input) prev.input = m.input
+        if (!prev.context && m.context) prev.context = m.context
         continue
       }
       byId.set(m.id, { ...m })
@@ -325,7 +330,8 @@ function readBody(req, limit = 50 * 1024 * 1024) {
       }
       chunks.push(c)
     })
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")))
+    // Tolerate a UTF-8 BOM some clients/shells prepend to JSON bodies.
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8").replace(/^\uFEFF/, "")))
     req.on("error", reject)
   })
 }
@@ -371,9 +377,10 @@ async function handleTurn({ dialect, body, req, res }) {
   applyToolChoice(canon, body.tool_choice)
 
   const models = await knownModels()
-  const ranked = rankFree(models.list, loadRankOrder())
+  const rankCfg = loadRankConfig()
+  const ranked = rankFree(models.list, rankCfg.order)
   const freeSet = new Set(models.list.filter((m) => m.free).map((m) => m.id))
-  const pick = pickModel({ requested: canon.model, ids: new Set(models.ids), freeSet, ranked, pin: PIN, fallback: FALLBACK_MODEL })
+  const pick = pickModel({ requested: canon.model, ids: new Set(models.ids), freeSet, ranked, slots: rankCfg.slots, pin: PIN, fallback: FALLBACK_MODEL })
   const model = pick.model
   const inputTokens = countTokensApprox(canon)
 
@@ -558,13 +565,15 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "GET" && (p === "/health" || p === "/")) {
       const models = await knownModels()
-      const ranked = rankFree(models.list, loadRankOrder())
+      const rankCfg = loadRankConfig()
+      const ranked = rankFree(models.list, rankCfg.order)
       return json(res, 200, {
         ok: true,
         opencode: accounts[0].client.baseUrl,
         eventStream: accounts[0].client.connected,
         models: models.ids,
-        freeRanked: ranked,
+        freeRanked: describeRanked(models.list, ranked),
+        modelSlots: rankCfg.slots,
         modelPin: PIN || null,
         defaultModel: PIN && models.ids.includes(PIN) ? PIN : ranked[0] || FALLBACK_MODEL,
         scratch: SCRATCH,
@@ -585,9 +594,15 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "GET" && p === "/v1/models") {
       const models = await knownModels()
-      const ranked = rankFree(models.list, loadRankOrder())
+      const rankCfg = loadRankConfig()
+      const ranked = rankFree(models.list, rankCfg.order)
       const byId = new Map(models.list.map((m) => [m.id, m]))
-      const freeList = ranked.map((id) => byId.get(id)).filter(Boolean)
+      const freeList = ranked
+        .map((id, i) => {
+          const m = byId.get(id)
+          return m ? { ...m, rank: i + 1 } : null
+        })
+        .filter(Boolean)
       const now = Math.floor(Date.now() / 1000)
       const wantsAnthropic = !!req.headers["anthropic-version"] || url.searchParams.get("format") === "anthropic"
       return json(res, 200, wantsAnthropic ? modelsAnthropic(freeList, now) : modelsOpenAI(freeList, now))

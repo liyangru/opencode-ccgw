@@ -1,15 +1,21 @@
 {
-  "$comment": "ccgw free-model preference order, best -> worst. Free models are auto-discovered from the accounts' live catalogs (cost 0/0 or a -free suffix); anything not listed here is appended automatically after this list. Edit freely - the gateway hot-reloads this file within a minute. Keep in sync with DEFAULT_ORDER in ranking.mjs (this file wins).",
+  "$comment": "ccgw free-model preference order (best -> worst) + Claude-style slot mapping. Free models are auto-discovered from the accounts' live catalogs (cost 0/0 or a -free suffix); anything not listed here is appended automatically. Hot-reloaded within a minute. Keep 'order' in sync with DEFAULT_ORDER in ranking.mjs (this file wins). Slots: a requested name containing haiku/sonnet/opus/fable (or exactly vision/image/vl) resolves to the slot's model - Claude Code sends hard-coded claude-* names for background tasks and aliases; slot targets must be free models or the request falls back to the top-ranked one.",
   "order": [
     "deepseek-v4.1-flash-free",
     "glm-5.3-flash-free",
-    "beam-free",
     "nemotron-3.5-super-vl-free",
+    "beam-free",
     "longcat-2.5-preview-free",
-    "nemotron-3-ultra-free",
-    "mimo-v2.6-flash-free",
     "space-bunny-free",
+    "mimo-v2.6-flash-free",
+    "nemotron-3-ultra-free",
     "nemotron-3.5-lightning-free",
     "big-pickle"
-  ]
+  ],
+  "slots": {
+    "opus": "deepseek-v4.1-flash-free",
+    "sonnet": "glm-5.3-flash-free",
+    "haiku": "nemotron-3.5-lightning-free",
+    "vision": "glm-5.3-flash-free"
+  }
 }

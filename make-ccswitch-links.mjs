@@ -5,10 +5,12 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const MODEL = "deepseek-v4.1-flash-free"
+const MODEL = "deepseek-v4.1-flash-free" // rank #1 — 默认会话 + opus 槽
+const MODEL_SONNET = "glm-5.3-flash-free" // rank #2 — 多模态主力(sonnet 槽)
+const MODEL_HAIKU = "nemotron-3.5-lightning-free" // rank #9 — 最快(haiku 槽 + 后台任务)
 const GATEWAY = "http://127.0.0.1:8317"
 const NAME = "ccgw (OpenCode)"
-const NOTES = "本机 OpenCode 免费模型网关 ccgw (127.0.0.1:8317)。默认模型 DeepSeek V4.1 Flash。"
+const NOTES = "本机 OpenCode 免费模型网关 ccgw (127.0.0.1:8317)。模型槽位按排名填好:opus=#1 DeepSeek V4.1 Flash(综合)、sonnet=#2 GLM 5.3 Flash(多模态/视频/PDF)、haiku=#9 Nemotron Lightning(最快)。"
 
 const enc = (s) => encodeURIComponent(s)
 const b64 = (s) => Buffer.from(s, "utf8").toString("base64")
@@ -18,11 +20,11 @@ const claudeConfig = JSON.stringify(
     env: {
       ANTHROPIC_BASE_URL: GATEWAY,
       ANTHROPIC_AUTH_TOKEN: "ccgw-local",
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: MODEL,
-      ANTHROPIC_DEFAULT_SONNET_MODEL: MODEL,
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: MODEL_HAIKU,
+      ANTHROPIC_DEFAULT_SONNET_MODEL: MODEL_SONNET,
       ANTHROPIC_DEFAULT_OPUS_MODEL: MODEL,
-      ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME: MODEL,
-      ANTHROPIC_DEFAULT_SONNET_MODEL_NAME: MODEL,
+      ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME: MODEL_HAIKU,
+      ANTHROPIC_DEFAULT_SONNET_MODEL_NAME: MODEL_SONNET,
       ANTHROPIC_DEFAULT_OPUS_MODEL_NAME: MODEL,
     },
   },
@@ -50,8 +52,8 @@ const claudeUrl =
     "endpoint=" + enc(GATEWAY),
     "apiKey=ccgw-local",
     "model=" + enc(MODEL),
-    "haikuModel=" + enc(MODEL),
-    "sonnetModel=" + enc(MODEL),
+    "haikuModel=" + enc(MODEL_HAIKU),
+    "sonnetModel=" + enc(MODEL_SONNET),
     "opusModel=" + enc(MODEL),
     "homepage=" + enc(GATEWAY + "/health"),
     "notes=" + enc(NOTES),

@@ -645,6 +645,8 @@ export function modelsAnthropic(list, now) {
       id: m.id,
       display_name: m.name || m.id,
       created_at: now,
+      ...(m.rank ? { ccgw_rank: m.rank } : {}),
+      ...(m.input ? { ccgw_input: m.input } : {}),
     })),
     has_more: false,
     first_id: list[0]?.id ?? null,
@@ -655,7 +657,14 @@ export function modelsAnthropic(list, now) {
 export function modelsOpenAI(list, now) {
   return {
     object: "list",
-    data: list.map((m) => ({ id: m.id, object: "model", created: now, owned_by: m.providerID || "opencode" })),
+    data: list.map((m) => ({
+      id: m.id,
+      object: "model",
+      created: now,
+      owned_by: m.providerID || "opencode",
+      ...(m.rank ? { ccgw_rank: m.rank } : {}),
+      ...(m.input ? { ccgw_input: m.input } : {}),
+    })),
   }
 }
 

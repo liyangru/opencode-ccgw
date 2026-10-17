@@ -98,15 +98,57 @@ Stop-ScheduledTask ccgw-gateway -ErrorAction SilentlyContinue; Start-ScheduledTa
 - 限流究竟按账户还是按 IP/设备判定取决于上游:**当前观察证据是"出口 IP 是主开关"**——同一出口 IP 被点名时,池内各实例 25 秒内接连被拒(实测 2026-10;当时本机只有 1 个账号的登录、其余为匿名实例——**不论实例/凭据/是否登录,同一 IP 一律被拒**),换回干净 IP 立即恢复。所以多账户的价值是"干净 IP 上的负载分摊",救不了 IP 级封禁;封禁靠下面的出口切换解决。
 - **实例 ≠ 账号**:`pool.total` / `pool.loggedIn` / `pool.anonymous` 分别是"实例数 / 已登录实例数 / 匿名实例数"——一个账号可以登录多个实例,**额度不会叠加**;未登录实例(如某个还没登录的新实例)以匿名身份承接请求,能分担并发但没有独立额度。要真正的多账户摊薄,每个实例必须登录**不同的账号**——看 `pool.distinctAccounts`(按 `email` 去重的账号数)。
 
-## 免费模型:自动发现 + 排名 + 选优
+## 免费模型:自动发现 + 排名 + 选优(模型槽位按需填充)
 
 网关自动从账户实例的实时目录里识别**免费模型**——判据取自上游元数据本身(`cost = 0/0`,或名字带 `-free` 后缀;`big-pickle` 这类无后缀的免费模型也能自动认出),按仓库根目录的 `model-ranks.json` 从强到弱排序,新出现的免费模型自动补到列表尾部(无需改代码;该文件热生效,约一分钟内刷新)。
 
-- **自动选优**:客户端请求的模型名只要是免费模型就直接用;**未知 / 付费目录 / 占位模型名**(如 `claude-sonnet-5-5`、`sonnet`、空)一律自动改用**排名第一**的免费模型——不会再出现"付费名透传 → 免费号必然报错 → 账号误冷却"的连锁;别名 `auto` / `best` / `best-free` / `ccgw-auto` / `free-auto` 等价于"用第一"。
-- `GET /v1/models` 只列**免费模型**且按排名顺序,客户端模型选择器里不再混入用不了的付费目录。
-- `GET /health` 的 `freeRanked` = 当前完整排名(另有 `defaultModel` / `modelPin`);每次请求日志带 `model` + `modelSource`(`requested` / `alias` / `not-free` / `top-free` / `default` / `static`)。
-- 想固定模型:`CCGW_MODEL=glm-5.3-flash-free`(须在免费列表内);想改排名:编辑 `model-ranks.json`;自检:`node test-ranking.mjs`。
-- 默认排名(2026-10,10 个免费模型,好 → 差):`deepseek-v4.1-flash-free` → `glm-5.3-flash-free` → `beam-free` → `nemotron-3.5-super-vl-free` → `longcat-2.5-preview-free` → `nemotron-3-ultra-free` → `mimo-v2.6-flash-free` → `space-bunny-free` → `nemotron-3.5-lightning-free` → `big-pickle`。
+**默认排名(2026-10-17:好 → 差;多模态不落榜——前 5 里有 4 个能看图/视频):**
+
+| # | 模型 | 输入能力 | 优点 / 适合 |
+|---|---|---|---|
+| 1 | `deepseek-v4.1-flash-free` | 文本 + 图片 | 综合首选,编码/代理任务最稳;能看图(截图/OCR);200k 上下文 |
+| 2 | `glm-5.3-flash-free` | 文本 + 图片 + **视频** + **PDF** | 多模态首选:唯一能读 **PDF**;图片/视频理解;200k 上下文 |
+| 3 | `nemotron-3.5-super-vl-free` | 文本 + 图片 | 最新视觉语言模型(2026-10-15);**1M 上下文** |
+| 4 | `beam-free` | 文本 | 501B 大模型(23B 激活):复杂推理/深度思考;1M 上下文 |
+| 5 | `longcat-2.5-preview-free` | 文本 + 图片 | 1M 上下文 + 图像理解:长文档/大代码库通读 |
+| 6 | `space-bunny-free` | 文本 + 图片 + **视频** | 匿名预览模型:1M 上下文、**54 万输出上限**(超长产出);稳定性不如正式模型 |
+| 7 | `mimo-v2.6-flash-free` | 文本 + 图片 + **音频** + **视频** | 唯一支持**音频**;闪速系列;200k 上下文 |
+| 8 | `nemotron-3-ultra-free` | 文本 | 550B 参数;1M 上下文(较老,2026-06) |
+| 9 | `nemotron-3.5-lightning-free` | 文本 | **最快**(专为速度设计):后台小任务首选;262k 上下文 |
+| 10 | `big-pickle` | 文本 | 经典隐形免费模型;200k 上下文 |
+
+按需速查:**看图** → #1/#2/#3/#5/#6/#7 任意;**看视频** → #2(glm)/#6/#7;**读 PDF** → 只有 #2(glm);**听音频** → 只有 #7(mimo);**超长上下文** → #3 起(1M);**要最快** → #9。
+
+**模型槽位(Claude Code 这类"多个模型槽"的客户端)**:`model-ranks.json` 的 `slots` 把槽位名映射到免费模型——客户端即使发来硬编码名(如 `claude-haiku-4-5-20251001`)也会被路由到对应槽位的模型:
+
+| 槽位 | 请求名匹配 | 当前指向 | 含义 |
+|---|---|---|---|
+| `opus` | 含 `opus` / `fable` | #1 `deepseek-v4.1-flash-free` | 最强档 → 排名第一 |
+| `sonnet` | 含 `sonnet` | #2 `glm-5.3-flash-free` | 日常主力 → 排名第二(顺带多模态:视频/PDF 都能看) |
+| `haiku` | 含 `haiku` | #9 `nemotron-3.5-lightning-free` | 小/快模型 + 后台任务(标题、摘要)→ 最快的 |
+| `vision` | 恰为 `vision` / `image` / `vl` | #2 `glm-5.3-flash-free` | 图片/视频/PDF 专用入口 |
+
+槽位目标必须是免费模型;指向的模型当前不可用时自动落回排名第一。改排名或槽位都只改 `model-ranks.json`(热生效)。
+
+**Claude Code 把各槽位直接按排名填好**(环境变量;填好后 `/model` 的 opus/sonnet/haiku 与后台任务各就各位):
+
+```bash
+export ANTHROPIC_BASE_URL="https://bronco-rewrap-january.ngrok-free.dev"   # 本机直连改成 http://127.0.0.1:8317
+export ANTHROPIC_AUTH_TOKEN="<口令>"                                       # 本机直连可填任意非空值
+export ANTHROPIC_MODEL="deepseek-v4.1-flash-free"                  # 默认会话 → 排名 #1
+export ANTHROPIC_DEFAULT_OPUS_MODEL="deepseek-v4.1-flash-free"     # opus 槽 → 排名 #1(最强)
+export ANTHROPIC_DEFAULT_SONNET_MODEL="glm-5.3-flash-free"         # sonnet 槽 → 排名 #2(多模态主力)
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="nemotron-3.5-lightning-free" # haiku 槽 + 后台任务 → 最快
+export CLAUDE_CODE_SUBAGENT_MODEL="deepseek-v4.1-flash-free"       # 子代理 → 排名 #1
+export API_TIMEOUT_MS=600000                                       # 大模型首字较慢,放宽超时
+```
+
+> Windows 上 `export X="v"` 换成 PowerShell 的 `$env:X="v"`(或 cmd 的 `set X=v`)。这些变量**不设也照样能用**:网关的槽位兜底会把 Claude 硬编码的模型名按上表自动路由;若版本还有 `ANTHROPIC_DEFAULT_FABLE_MODEL` 槽位,fable 默认归入 opus 槽。
+
+- **自动选优**:请求名只要是免费模型就直接用;**槽位名**按上表对齐;**未知 / 付费目录 / 占位名**(如 `claude-sonnet-5-5`、空)落到排名第一——不会再出现"付费名透传 → 免费号必然报错 → 账号误冷却"的连锁;别名 `auto` / `best` / `best-free` / `ccgw-auto` / `free-auto` 等价于"用第一"。
+- `GET /v1/models` 只列**免费模型**(按排名顺序),每条带 `ccgw_rank`(排名)与 `ccgw_input`(输入能力),客户端模型选择器里不再混入用不了的付费目录。
+- `GET /health` 的 `freeRanked` = 当前完整排名(每条含 `rank` / `id` / `name` / `input` / `context`),另有 `modelSlots`(槽位映射)/ `defaultModel` / `modelPin`;每次请求日志带 `model` + `modelSource`(`requested` / `slot:<槽位>` / `alias` / `not-free` / `top-free` / `default` / `static`)。
+- 想固定模型:`CCGW_MODEL=glm-5.3-flash-free`(须在免费列表内;它只影响"兜底用哪个",槽位匹配优先);自检:`node test-ranking.mjs`。
 
 ## 全池限流 → 自动切换出口(备用 VPN:WARP / Nord / VPN Gate)
 
@@ -152,9 +194,9 @@ Stop-ScheduledTask ccgw-gateway -ErrorAction SilentlyContinue; Start-ScheduledTa
 | API 端点 (base_url) | `http://127.0.0.1:8317`(不要带 `/v1`) |
 | 上游格式 | **Anthropic Messages(原生)** |
 | API Key | 本机直连:任意非空值(不校验);从隧道/局域网访问时必须填口令(见「共享给朋友」) |
-| 模型 | 任意名字(如 `claude-sonnet-5`);不匹配免费模型 ID 时自动路由到默认模型 |
+| 模型 | 任意(如 `claude-sonnet-5`):免费模型名直用,`haiku` / `sonnet` / `opus` 等按「免费模型」章节的槽位表对齐,其余落排名第一 |
 
-手工配置等价于:`ANTHROPIC_BASE_URL=http://127.0.0.1:8317`、`ANTHROPIC_AUTH_TOKEN=local`。
+手工配置等价于:`ANTHROPIC_BASE_URL=http://127.0.0.1:8317`、`ANTHROPIC_AUTH_TOKEN=local`;想让 `/model` 的 sonnet/opus/haiku 与后台任务分别落到排名靠前的不同模型,把「免费模型」章节的槽位环境变量片段填上(不填也能用,网关有槽位兜底)。
 
 ### Codex
 
@@ -218,7 +260,7 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
   ```
 
   OpenAI 风格把路径换成 `/v1/chat/completions`(或 `/v1/responses`);认证支持 `x-api-key: <token>`、`Authorization: Bearer <token>`、Basic `opencode:<token>`。
-- 额度共享:所有人吃同一个免费账户池;单账户限流自动绕开,全池限流时守卫自动切出口(WARP);任意模型名(含付费名/占位名)自动解析为排名第一的免费模型——见「免费模型:自动发现 + 排名 + 选优」。
+- 额度共享:所有人吃同一个免费账户池;单账户限流自动绕开,全池限流时守卫自动切出口(WARP);任意模型名自动解析——`haiku` / `sonnet` / `opus` 等槽位名按槽位表对齐,其余(含付费名/占位名)落排名第一——见「免费模型:自动发现 + 排名 + 选优(模型槽位按需填充)」;建议朋友照着该章节把 Claude Code 各模型槽位填好。
 
 ## 端点
 
@@ -228,8 +270,8 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 | POST | `/v1/messages/count_tokens` | 本地估算(Claude Code 会用) |
 | POST | `/v1/chat/completions` | OpenAI Chat Completions(流式、工具) |
 | POST | `/v1/responses` | OpenAI Responses / Codex(流式、函数调用) |
-| GET | `/v1/models` | 免费模型列表,按排名顺序(带 `anthropic-version` 头返回 Anthropic 形状,否则 OpenAI 形状) |
-| GET | `/health` | 状态 + 账户池(连接/冷却/登录身份)+ `pool` 全池限流信号 + 模型目录 + `freeRanked` 免费模型排名(`defaultModel` / `modelPin`) |
+| GET | `/v1/models` | 免费模型列表,按排名顺序;每条带 `ccgw_rank` 排名与 `ccgw_input` 输入能力(带 `anthropic-version` 头返回 Anthropic 形状,否则 OpenAI 形状) |
+| GET | `/health` | 状态 + 账户池(连接/冷却/登录身份)+ `pool` 全池限流信号 + 模型目录 + `freeRanked` 免费模型排名(每条含 rank/输入能力/上下文)+ `modelSlots` 槽位映射 + `defaultModel` / `modelPin` |
 
 ## 环境变量
 
@@ -237,7 +279,7 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 |---|---|---|
 | `CCGW_PORT` | `8317` | 监听端口 |
 | `CCGW_HOST` | `127.0.0.1` | 监听地址(仅本机) |
-| `CCGW_MODEL` | 空(自动) | 固定模型 pin(可选,须在免费列表内)。空 = 自动选排名第一的免费模型 |
+| `CCGW_MODEL` | 空(自动) | 固定模型 pin(可选,须在免费列表内)。空 = 自动:槽位名走槽位映射、其余用排名第一的免费模型;设置后作为"兜底默认"(槽位匹配仍优先) |
 | `CCGW_TOKEN` | 空 | 访问口令。本机直连(回环、无转发头)免校验;隧道/局域网等远端来源必须带 `Authorization: Bearer <token>` 或 `x-api-key: <token>`(或 Basic `opencode:<token>`) |
 | `CCGW_SCRATCH` | `%TEMP%\ccgw-scratch` | 会话 location / 桥接注册目录(被清理后自动重建) |
 | `CCGW_MAX_CONCURRENCY` | `3` | 并发回合上限(排队) |
