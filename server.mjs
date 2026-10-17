@@ -97,7 +97,7 @@ function loadAccounts() {
             password = JSON.parse(fs.readFileSync(sf, "utf8")).password || ""
           } catch {}
         }
-        list.push({ name: String(a.name || "acct" + (list.length + 1)), baseUrl: String(a.url).replace(/\/+$/, ""), password })
+        list.push({ name: String(a.name || "acct" + (list.length + 1)), baseUrl: String(a.url).replace(/\/+$/, ""), password, identity: a.identity || "", credentialId: a.credentialId || "" })
       }
       if (list.length) return { pool: true, list }
       console.log("[ccgw] accounts file has no usable entries; using single service")
@@ -115,9 +115,12 @@ const accounts = poolCfg.list.map((a) => ({
   name: a.name,
   client: new OpenCode({ baseUrl: a.baseUrl, password: a.password }),
   password: a.password,
+  identity: a.identity || "",
+  credentialId: a.credentialId || "",
   coolingUntil: 0,
   fails: 0,
   lastError: null,
+  lastLimited: false,
   modelCache: { at: 0, ids: [], list: [] },
 }))
 for (const a of accounts) {
@@ -222,21 +225,49 @@ function pickAccount(tried) {
   return pick
 }
 
-function coolDown(a, reason, seconds) {
+function coolDown(a, reason, seconds, limited = false) {
   // consecutive failures double the cooldown (a fully spent quota should not
   // be retried every few minutes); markOk() resets it after a success
   const secs = Math.min(seconds * 2 ** a.fails, 1800)
   a.coolingUntil = Math.max(a.coolingUntil, Date.now() + secs * 1000)
   a.fails++
   a.lastError = reason
+  a.lastLimited = limited
   console.log("[ccgw] cooldown " + a.name + " for " + secs + "s: " + reason)
   logLine({ phase: "cooldown", account: a.name, seconds: secs, msg: reason })
+  notePoolState()
 }
 
 function markOk(a) {
   a.fails = 0
   a.lastError = null
+  a.lastLimited = false
   a.coolingUntil = 0
+  notePoolState()
+}
+
+// Pool-level quota state: every account rate-limited at once is the signal
+// net-guard.ps1 (zero-window) listens for - it switches the machine's egress
+// to NordVPN when the whole pool is dry. Harmless when nobody watches /health.
+let lastQuotaState = false
+function poolState() {
+  const now = Date.now()
+  const cooling = accounts.filter((a) => a.coolingUntil > now)
+  const quotaExhausted =
+    accounts.length > 0 && cooling.length === accounts.length && accounts.every((a) => a.lastLimited)
+  return { total: accounts.length, cooling: cooling.length, quotaExhausted }
+}
+function notePoolState() {
+  const s = poolState()
+  if (s.quotaExhausted === lastQuotaState) return
+  lastQuotaState = s.quotaExhausted
+  if (s.quotaExhausted) {
+    console.log("[ccgw] [net] all " + accounts.length + " account(s) rate-limited - quota exhausted signal")
+    logLine({ phase: "net", event: "quota-exhausted", accounts: accounts.map((a) => a.name) })
+  } else {
+    console.log("[ccgw] [net] quota state cleared")
+    logLine({ phase: "net", event: "quota-cleared" })
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -428,7 +459,7 @@ async function handleTurn({ dialect, body, req, res }) {
         const limited = RATE_LIMIT_RE.test(failMsg)
         const down = UNAVAILABLE_RE.test(failMsg)
         if (!clientGone) {
-          if (limited) coolDown(a, "rate-limited: " + failMsg.slice(0, 160), COOLDOWN_SECONDS)
+          if (limited) coolDown(a, "rate-limited: " + failMsg.slice(0, 160), COOLDOWN_SECONDS, true)
           else if (down) coolDown(a, "unreachable: " + failMsg.slice(0, 160), DOWN_COOLDOWN_SECONDS)
         }
         const rotatable = !clientGone && !emitted && attempt < accounts.length - 1 && (limited || down)
@@ -510,11 +541,14 @@ const server = http.createServer(async (req, res) => {
         accounts: accounts.map((a) => ({
           name: a.name,
           url: a.client.baseUrl,
+          identity: a.identity || null,
+          credentialId: a.credentialId || null,
           eventStream: a.client.connected,
           coolingSeconds: Math.max(0, Math.ceil((a.coolingUntil - Date.now()) / 1000)),
           fails: a.fails,
           lastError: a.lastError,
         })),
+        pool: poolState(),
       })
     }
 

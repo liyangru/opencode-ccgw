@@ -60,8 +60,39 @@ if ($Target) {
 
 Write-Host ""
 Write-Host "Authenticated integrations for '$Name':"
-& $CliPath auth list
+$jtxt = (& $CliPath auth list --standalone --format json 2>&1 | Out-String)
+$identity = ""
+$credId = ""
+try {
+  foreach ($i in ($jtxt | ConvertFrom-Json)) {
+    foreach ($c in $i.connections) {
+      $identity = "$($i.name) / $($c.label)"
+      $credId = "$($c.id)"
+    }
+  }
+  if ($identity) { Write-Host "  $identity  ($credId)" }
+  else { Write-Host "  no integration found - login may not have completed" }
+} catch { Write-Host "  (could not read integration list: $($_.Exception.Message))" }
+
+# Record the identity in accounts.json so the gateway /health and
+# accounts-status.ps1 can tell accounts apart. Logging the SAME account in
+# again keeps the same credential id; a genuinely new account gets a new one.
+if ($identity) {
+  $accountsFile = Join-Path $zw "accounts.json"
+  if (Test-Path $accountsFile) {
+    $cfg = Get-Content $accountsFile -Raw | ConvertFrom-Json
+    foreach ($a in $cfg.accounts) {
+      if ($a.name -eq $Name) {
+        $a | Add-Member -NotePropertyName identity -NotePropertyValue $identity -Force
+        $a | Add-Member -NotePropertyName credentialId -NotePropertyValue $credId -Force
+      }
+    }
+    [IO.File]::WriteAllText($accountsFile, ($cfg | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
+    Write-Host "  identity recorded in accounts.json"
+  }
+}
+
 Write-Host ""
-Write-Host "If an integration is listed above, this account is ready."
 Write-Host "Restart its serve instance so it picks up the credentials:"
 Write-Host "  Stop-ScheduledTask ccgw-serve-$Name -ErrorAction SilentlyContinue; Start-ScheduledTask ccgw-serve-$Name"
+Write-Host "Check all accounts: powershell -ExecutionPolicy Bypass -File zero-window\accounts-status.ps1"
