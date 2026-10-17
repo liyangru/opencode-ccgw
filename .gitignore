@@ -21,3 +21,7 @@ zero-window/net-guard.pause
 zero-window/net-guard.toast
 zero-window/net-guard.backend
 zero-window/egress-vpngate.last
+
+# zero-window runtime (watchdog pause + renamed pause backups)
+zero-window/warp-guard.pause
+zero-window/*.pause.bak

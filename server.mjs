@@ -53,6 +53,7 @@ import {
   countTokensApprox,
 } from "./formats.mjs"
 import { describeRanked, isFreeModel, loadRankConfig, pickModel, rankFree } from "./ranking.mjs"
+import { classifyError } from "./errors.mjs"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -120,6 +121,7 @@ const accounts = poolCfg.list.map((a) => ({
   identity: a.identity || "",
   credentialId: a.credentialId || "",
   coolingUntil: 0,
+  rateLimits: new Map(),
   fails: 0,
   lastError: null,
   lastLimited: false,
@@ -226,62 +228,85 @@ async function knownModels() {
 // ---------------------------------------------------------------------------
 // Account selection: round-robin, skipping cooling accounts
 
-const RATE_LIMIT_RE = /429|too many requests|rate.?limit|quota|usage limit|usage exceeded|limit reached|limit exceeded|hit your limit|free (tier|usage)|slow down|try again (later|in)|subscribe|capacity/i
-const UNAVAILABLE_RE = /fetch failed|ECONNREFUSED|ECONNRESET|socket hang up|EHOSTUNREACH|ECONNABORTED|networkerror/i
-
 let rr = 0
-function pickAccount(tried) {
+function readyAt(a, model) {
+  return Math.max(a.coolingUntil, a.rateLimits.get(model)?.until || 0)
+}
+
+function pickAccount(tried, model) {
   const now = Date.now()
-  const fresh = accounts.filter((a) => !tried.has(a.name))
-  const avail = fresh.filter((a) => a.coolingUntil <= now)
-  const candidates = avail.length ? avail : fresh
+  const candidates = accounts.filter((a) => !tried.has(a.name) && readyAt(a, model) <= now)
+  if (!candidates.length) return null
   const pick = candidates[rr % candidates.length]
   rr++
   return pick
 }
 
-function coolDown(a, reason, seconds, limited = false) {
+function coolDown(a, reason, seconds, model, retryAfterSeconds) {
   // consecutive failures double the cooldown (a fully spent quota should not
   // be retried every few minutes); markOk() resets it after a success
-  const secs = Math.min(seconds * 2 ** a.fails, 1800)
-  a.coolingUntil = Math.max(a.coolingUntil, Date.now() + secs * 1000)
-  a.fails++
+  const previous = model ? a.rateLimits.get(model) : null
+  const fails = model ? previous?.fails || 0 : a.fails
+  const secs = retryAfterSeconds || Math.min(seconds * 2 ** Math.min(fails, 10), 1800)
+  if (model) a.rateLimits.set(model, { until: Math.max(previous?.until || 0, Date.now() + secs * 1000), fails: fails + 1, message: reason })
+  else {
+    a.coolingUntil = Math.max(a.coolingUntil, Date.now() + secs * 1000)
+    a.fails++
+  }
   a.lastError = reason
-  a.lastLimited = limited
+  a.lastLimited = !!model
   console.log("[ccgw] cooldown " + a.name + " for " + secs + "s: " + reason)
-  logLine({ phase: "cooldown", account: a.name, seconds: secs, msg: reason })
+  logLine({ phase: "cooldown", account: a.name, model: model || null, seconds: secs, source: retryAfterSeconds ? "provider-retry-after" : "local-backoff", msg: reason })
   notePoolState()
 }
 
-function markOk(a) {
-  a.fails = 0
-  a.lastError = null
-  a.lastLimited = false
-  a.coolingUntil = 0
+function markOk(a, model, started) {
+  // A successful in-flight request must not clear another request's newer failure.
+  if (a.coolingUntil === started.networkUntil) {
+    a.fails = 0
+    a.coolingUntil = 0
+  }
+  if (a.rateLimits.get(model) === started.rateLimit) a.rateLimits.delete(model)
+  if (a.coolingUntil <= Date.now() && ![...a.rateLimits.values()].some((r) => r.until > Date.now())) {
+    a.lastError = null
+    a.lastLimited = false
+  }
   notePoolState()
 }
 
-// Pool-level quota state: every account rate-limited at once is the signal
-// net-guard.ps1 (zero-window) listens for - it switches the machine's egress
-// to NordVPN when the whole pool is dry. Harmless when nobody watches /health.
+// A 429 is scoped conservatively to the requested account/model pair.
+// One model's limit is not evidence that every model or the whole IP is limited.
 let lastQuotaState = false
 function poolState() {
   const now = Date.now()
-  const cooling = accounts.filter((a) => a.coolingUntil > now)
-  const quotaExhausted =
-    accounts.length > 0 && cooling.length === accounts.length && accounts.every((a) => a.lastLimited)
+  const cooling = accounts.filter((a) => a.coolingUntil > now || [...a.rateLimits.values()].some((r) => r.until > now))
+  const knownFree = [...new Set(accounts.flatMap((a) => a.modelCache.list.filter((m) => m.free).map((m) => m.id)))]
+  const limitedModels = knownFree.filter((id) => accounts.every((a) => (a.rateLimits.get(id)?.until || 0) > now))
+  const quotaExhausted = accounts.length > 0 && knownFree.length > 0 && limitedModels.length === knownFree.length
   // total/loggedIn/anonymous count INSTANCES, not distinct accounts: one account
   // may be logged in on several instances, and that does not stack quota.
   const loggedIn = accounts.filter((a) => a.identity).length
   const distinctAccounts = new Set(accounts.map((a) => a.email).filter(Boolean)).size
-  return { total: accounts.length, loggedIn, distinctAccounts, anonymous: accounts.length - loggedIn, cooling: cooling.length, quotaExhausted }
+  return { total: accounts.length, loggedIn, distinctAccounts, anonymous: accounts.length - loggedIn, cooling: cooling.length, quotaExhausted, limitedModels }
+}
+
+function retrySeconds(model) {
+  return Math.max(0, Math.ceil((Math.min(...accounts.map((a) => readyAt(a, model))) - Date.now()) / 1000))
+}
+
+function coolingError(model) {
+  const seconds = Math.max(1, retrySeconds(model))
+  const limited = accounts.some((a) => (a.rateLimits.get(model)?.until || 0) > Date.now())
+  return Object.assign(new Error(`No ready OpenCode instance for ${model}. Retry in ${seconds}s (local gateway cooldown, not the provider's quota reset time).`), {
+    status: limited ? 429 : 503, retryAfterSeconds: seconds,
+  })
 }
 function notePoolState() {
   const s = poolState()
   if (s.quotaExhausted === lastQuotaState) return
   lastQuotaState = s.quotaExhausted
   if (s.quotaExhausted) {
-    console.log("[ccgw] [net] all " + accounts.length + " instance(s) rate-limited - quota exhausted signal")
+    console.log("[ccgw] [net] all known free models rate-limited across " + accounts.length + " instance(s)")
     logLine({ phase: "net", event: "quota-exhausted", accounts: accounts.map((a) => a.name) })
   } else {
     console.log("[ccgw] [net] quota state cleared")
@@ -342,10 +367,11 @@ function json(res, status, obj) {
   res.end(body)
 }
 
-function errorShape(dialect, message, status = 500) {
-  if (dialect === "anthropic") return { type: "error", error: { type: status === 400 ? "invalid_request_error" : "api_error", message } }
-  if (dialect === "openai") return { error: { message, type: "server_error", param: null, code: null } }
-  return { error: { message, type: "server_error", code: status } }
+function errorShape(dialect, message, status = 500, code = null) {
+  const failure = classifyError({ message, status })
+  const type = status === 400 ? "invalid_request_error" : failure.type
+  if (dialect === "anthropic") return { type: "error", error: { type, message } }
+  return { error: { message, type, ...(dialect === "openai" ? { param: null } : {}), code: code ?? failure.code } }
 }
 
 function authed(req) {
@@ -401,7 +427,8 @@ async function handleTurn({ dialect, body, req, res }) {
   const promptText = renderPrompt(canon, bridgeName, nameMap?.origToSan)
 
   let stream = null
-  if (canon.stream) {
+  const startStream = () => {
+    if (!canon.stream || stream) return
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
@@ -440,9 +467,15 @@ async function handleTurn({ dialect, body, req, res }) {
     await sem.acquire()
     try {
       for (let attempt = 0; attempt < accounts.length; attempt++) {
-        const a = pickAccount(tried)
+        if (ac.signal.aborted) throw new Error("Client disconnected")
+        const a = pickAccount(tried, model)
+        if (!a) {
+          error = coolingError(model)
+          break
+        }
         tried.add(a.name)
         account = a
+        const started = { networkUntil: a.coolingUntil, rateLimit: a.rateLimits.get(model) }
         let r = null
         let e = null
         let bridgeOk = false
@@ -458,7 +491,8 @@ async function handleTurn({ dialect, body, req, res }) {
             bridgeName,
             sanToOrig: nameMap?.sanToOrig,
             onTextDelta: (d) => {
-              if (stream) {
+              if (canon.stream && d) {
+                startStream()
                 emitted = true
                 stream.onDelta(d)
               }
@@ -482,23 +516,30 @@ async function handleTurn({ dialect, body, req, res }) {
         if (!failMsg) {
           result = r
           sid = r.sessionID
-          markOk(a)
+          markOk(a, model, started)
           break
         }
 
         const clientGone = ac.signal.aborted
-        const limited = RATE_LIMIT_RE.test(failMsg)
-        const down = UNAVAILABLE_RE.test(failMsg)
+        const failure = classifyError(e || r?.error || new Error(failMsg))
+        const limited = failure.kind === "rate_limit"
+        const down = failure.kind === "network"
         if (!clientGone) {
-          if (limited) coolDown(a, "rate-limited: " + failMsg.slice(0, 160), COOLDOWN_SECONDS, true)
+          if (limited) coolDown(a, "rate-limited: " + failMsg.slice(0, 160), COOLDOWN_SECONDS, model, failure.retryAfterSeconds)
           else if (down) coolDown(a, "unreachable: " + failMsg.slice(0, 160), DOWN_COOLDOWN_SECONDS)
+          else {
+            // Admission/authentication refusals are not evidence of exhausted quota.
+            a.lastError = failMsg.slice(0, 160)
+            a.lastLimited = false
+            notePoolState()
+          }
         }
         const rotatable = !clientGone && !emitted && attempt < accounts.length - 1 && (limited || down)
         if (rotatable) {
           logLine({ reqId, phase: "rotate", account: a.name, msg: "failed (" + (limited ? "rate limited" : "unreachable") + "), trying next account: " + failMsg.slice(0, 160) })
           continue
         }
-        error = e || new Error(failMsg)
+        error = e || r?.error || new Error(failMsg)
         break
       }
     } finally {
@@ -512,14 +553,19 @@ async function handleTurn({ dialect, body, req, res }) {
   }
 
   const durationMs = Date.now() - t0
+  if (ac.signal.aborted || res.destroyed) return
   if (error || result?.error) {
-    const message = String(error?.message || result?.error?.message || "turn failed")
-    logLine({ reqId, account: account?.name, dialect, requestedModel: canon.model, model, modelSource: pick.source, stream: canon.stream, tools: canon.tools.length, bridge: bridgeName, sessionID: sid, durationMs, error: message })
+    const failure = classifyError(error || result?.error)
+    const message = failure.message
+    logLine({ reqId, account: account?.name, dialect, requestedModel: canon.model, model, modelSource: pick.source, stream: canon.stream, tools: canon.tools.length, bridge: bridgeName, sessionID: sid, durationMs, error: message, upstreamStatus: failure.status, errorKind: failure.kind, errorCode: failure.code })
     if (stream) {
-      stream.fail(error || new Error(message))
+      stream.fail(failure)
       res.end()
     } else {
-      json(res, error ? 502 : 500, errorShape(dialect, message, error ? 502 : 500))
+      const seconds = failure.status === 429 || failure.status === 503
+        ? retrySeconds(model) || failure.retryAfterSeconds : undefined
+      if (seconds) res.setHeader("Retry-After", String(Math.max(1, Math.ceil(seconds))))
+      json(res, failure.status, errorShape(dialect, message, failure.status, failure.code))
     }
     return
   }
@@ -542,7 +588,8 @@ async function handleTurn({ dialect, body, req, res }) {
     durationMs,
   })
 
-  if (stream) {
+  if (canon.stream) {
+    startStream()
     stream.finish(result)
     res.end()
   } else if (dialect === "anthropic") {
@@ -584,7 +631,8 @@ const server = http.createServer(async (req, res) => {
           credentialId: a.credentialId || null,
           email: a.email || null,
           eventStream: a.client.connected,
-          coolingSeconds: Math.max(0, Math.ceil((a.coolingUntil - Date.now()) / 1000)),
+          coolingSeconds: Math.max(0, Math.ceil((Math.max(a.coolingUntil, ...[...a.rateLimits.values()].map((r) => r.until)) - Date.now()) / 1000)),
+          modelCooldowns: Object.fromEntries([...a.rateLimits].filter(([, r]) => r.until > Date.now()).map(([id, r]) => [id, { retryAfterSeconds: Math.max(1, Math.ceil((r.until - Date.now()) / 1000)), source: "gateway-cooldown" }])),
           fails: a.fails,
           lastError: a.lastError,
         })),

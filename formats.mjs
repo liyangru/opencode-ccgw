@@ -262,6 +262,14 @@ export function renderPrompt(canon, bridgeName, origToSan) {
   }
   lines.push("=== End of conversation ===")
   lines.push("")
+  if (canon.tools.length && bridgeName && origToSan) {
+    lines.push("Client tool routing:")
+    lines.push("Execute operations requested in this conversation with the client's bridged tools below. The built-in read tool belongs to the isolated gateway backend, not the user's workspace; do not use it for client file reads.")
+    for (const t of canon.tools) {
+      lines.push(t.name + " -> " + bridgeName + "_" + (origToSan.get(t.name) || t.name))
+    }
+    lines.push("")
+  }
   const lastRole = canon.messages.length ? canon.messages[canon.messages.length - 1].role : ""
   let directive
   if (lastRole === "tool") {
@@ -463,7 +471,7 @@ export function makeAnthropicStream(send, model, inputTokens) {
       send("message_stop", { type: "message_stop" })
     },
     fail(err) {
-      send("error", { type: "error", error: { type: "api_error", message: String(err?.message || err) } })
+      send("error", { type: "error", error: { type: err?.type || "api_error", message: String(err?.message || err) } })
     },
   }
 }
@@ -494,7 +502,7 @@ export function makeOpenAIStream(send, model, inputTokens) {
       send(null, "[DONE]")
     },
     fail(err) {
-      send(null, { error: { message: String(err?.message || err), type: "server_error" } })
+      send(null, { error: { message: String(err?.message || err), type: err?.type || "server_error", ...(err?.code ? { code: err.code } : {}) } })
       send(null, "[DONE]")
     },
   }
@@ -629,7 +637,7 @@ export function makeResponsesStream(send, model, inputTokens) {
       send("response.failed", {
         type: "response.failed",
         sequence_number: seq++,
-        response: { ...baseResponse(), status: "failed", error: { code: "server_error", message: String(err?.message || err) } },
+        response: { ...baseResponse(), status: "failed", error: { code: err?.code || "server_error", message: String(err?.message || err) } },
       })
     },
   }

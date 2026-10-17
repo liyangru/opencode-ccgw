@@ -86,12 +86,14 @@ export class OpenCode {
     try {
       json = text ? JSON.parse(text) : null
     } catch {}
-    return { status: res.status, ok: res.ok, text, json }
+    return { status: res.status, ok: res.ok, text, json, headers: { "retry-after": res.headers.get("retry-after") } }
   }
 
   async reqOrThrow(method, p, body) {
     const r = await this.req(method, p, body)
-    if (!r.ok) throw new Error(`${method} ${p} -> ${r.status} ${r.text.slice(0, 300)}`)
+    if (!r.ok) throw Object.assign(new Error(`${method} ${p} -> ${r.status} ${r.text.slice(0, 300)}`), {
+      status: r.status, response: { body: r.text, headers: r.headers },
+    })
     return r.json
   }
 

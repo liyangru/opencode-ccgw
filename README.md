@@ -16,7 +16,8 @@
 - **免费模型路由**:不匹配已知免费模型 ID 的模型名自动路由到默认模型(可用 `CCGW_MODEL` 配置)。
 - **零窗口模式**:登录自动启动(两个计划任务),无任何窗口;可完全不开桌面版使用。
 - **多账户账户池**:一账户一隔离实例(独立 profile / 端口 / 计划任务),网关轮询分摊请求,命中限流自动冷却并换户重试(见下文)。
-- **全池限流自动切出口**:所有账户同时被限流(IP 级限流信号)时,`net-guard` 自动把机器出口切到备用 VPN——已装 NordVPN 用官方 CLI 通道(零窗口、约 2 秒);另有**免费免登录的 VPN Gate** 后端(Windows 原生 L2TP,零安装)可按需手动启用;一键 `net-back` 回切(见下文)。
+- **可选自动切出口**:所有已知免费模型在全池均进入限流冷却时,`net-guard` 按已有配置处理备用 VPN;此信号本身不能确定上游按 IP 限流。可通过 `net-guard.pause` 暂停自动切换,一键 `net-back` 回切(见下文)。
+- **备用出口保活**:接上备用出口后,`warp-guard`(计划任务 `ccgw-warp-guard`,登录时 + 每 ~10 分钟)只在 WARP 掉线时自动重连——永远不会主动断开;回切家宽仍是手动动作。
 - **CC Switch 深链生成**:一条命令生成 Claude Code / Codex 的一键导入链接。
 - **最小权限会话**:`[deny *, allow read, allow <bridge>_*]`——只保留 `read`(免费层要求请求包含 `read` 工具,否则 403)与桥接工具。
 - **JSONL 日志**:每请求一行:`reqId, dialect, requestedModel, model, bridge, sessionID, toolCalls, usage, durationMs`。
@@ -66,7 +67,7 @@ zero-window\stop.cmd       # 停止(并禁用自启)
 
 ## 多账户(账户池)
 
-免费层额度按账户计算,单个账户容易被打满。ccgw 支持把请求分摊到多个 OpenCode 账户:每个账户跑**一个独立实例**(独立 profile + 独立端口 + 独立计划任务,互不共享登录态与会话库),网关侧做**轮询 + 冷却 + 自动重试**。
+ccgw 支持把请求分摊到多个 OpenCode 账户:每个账户跑**一个独立实例**(独立 profile + 独立端口 + 独立计划任务,互不共享登录态与会话库),网关侧做**轮询 + 冷却 + 自动重试**。具体额度统计范围由上游决定;本地将 429 保守记录到“账户 + 模型”,不把它直接认定为账户全部额度或 IP 额度耗尽。
 
 ```powershell
 # 1) 开通一个新账户实例(自动分配端口,创建隔离 profile 与计划任务)
@@ -99,6 +100,17 @@ Stop-ScheduledTask ccgw-gateway -ErrorAction SilentlyContinue; Start-ScheduledTa
 - **实例 ≠ 账号**:`pool.total` / `pool.loggedIn` / `pool.anonymous` 分别是"实例数 / 已登录实例数 / 匿名实例数"——一个账号可以登录多个实例,**额度不会叠加**;未登录实例(如某个还没登录的新实例)以匿名身份承接请求,能分担并发但没有独立额度。要真正的多账户摊薄,每个实例必须登录**不同的账号**——看 `pool.distinctAccounts`(按 `email` 去重的账号数)。
 
 ## 免费模型:自动发现 + 排名 + 选优(模型槽位按需填充)
+
+### 限流与重试
+
+- 429 按“账户 + 模型”记录冷却；一个模型限流不阻止同一账户使用其他模型，也不会因其他模型成功而清除冷却。
+- 优先遵守上游 `Retry-After`；没有提示时使用本地退避（默认 300 秒，连续失败递增，默认上限 1800 秒）。这是网关的重试间隔，不是官方额度重置时间。
+- 所有候选都在冷却时，返回 429 / 503 和 `Retry-After`，不会继续请求冷却中的实例。网络故障的冷却仍适用于该实例的所有模型。
+- 并发请求中，迟到的成功不能清除新产生的冷却，较短的限流提示不能缩短已有截止时间。
+- 流式响应在首个非空内容到达后才发送 SSE 头；此前的错误保留真实 HTTP 状态。已经开始输出的请求不会换账户重放。
+- `/health` 的 `pool.limitedModels` 和账户的 `modelCooldowns` 提供分模型状态；只有所有已知免费模型在全池均被限流时才发出全池信号。这不能证明限制按 IP 统计。
+
+回归验证：`node --test test-errors.mjs`（本地 HTTP/SSE 模拟，不消耗上游额度）。
 
 网关自动从账户实例的实时目录里识别**免费模型**——判据取自上游元数据本身(`cost = 0/0`,或名字带 `-free` 后缀;`big-pickle` 这类无后缀的免费模型也能自动认出),按仓库根目录的 `model-ranks.json` 从强到弱排序,新出现的免费模型自动补到列表尾部(无需改代码;该文件热生效,约一分钟内刷新)。
 
@@ -168,6 +180,7 @@ export API_TIMEOUT_MS=600000                                       # 大模型�
 - 已在备用出口上仍显示全池限流(**超过约 6 分钟冷却排水期**)→ 日志提醒"该出口可能也被限"(不自动换节点/换服务器,避免频繁换 IP);
 - 平时零动作。暂停:`zero-window` 下建 `net-guard.pause`;日志:`zero-window\net-guard.log`(每 ~10 分钟一行 heartbeat,可判断守卫存活);切换时弹系统通知:建文件 `net-guard.toast`(默认关);自启:`setup.ps1` 检测到 NordVPN 时注册 `net-guard.vbs`(计划任务;无管理员权限时退回注册表 Run 键)。WARP / Nord 都没装时 `auto` 不切换(VPN Gate 仍可显式 `-Backend vpngate`,注意上方警示)。
 - **残留自愈**:守卫每轮都检查 `ccgw-vpngate`——当前后端不是 `vpngate` 时,若发现它仍连着,判定为测试/手动残留,自动断开并记日志(`stale egress cleanup`);**`net-guard.pause` 暂停期间同样生效**,机器不会被静默留在公共出口上。
+- **备用出口保活(2026-10-18)**:连上备用出口后由 `zero-window\warp-guard.ps1`(+ 计划任务 `ccgw-warp-guard`,登录时与每 ~10 分钟)看护——WARP 掉线就重连,已连接则什么都不做;日志 `zero-window\warp-guard.log`,暂停建 `warp-guard.pause`。它补的是 `ccgw-warp-login`(只在登录后连一次)的空档:睡眠唤醒 / WARP 服务重启 / 误断之后都能自动补连。它**只连不断**,回切家宽依旧手动。
 
 > ⚠️ 实测警示(2026-10):**公共 VPN 的共享出口对"刷新免费额度"基本无效**——VPN Gate 的中继 IP 被全球用户共用,免费层很可能早已按其限流(实测连上后第一个请求即被拒:"free tier can only be used from within OpenCode",池内实例全部被连坐——当时本机只有 1 个账号、其余为匿名实例,证明按 IP 判定、与账户无关;换回干净出口立即恢复)。后续复测(2026-10-17):经 VPN Gate 出口时**即使重新登录授权,免费层请求仍全部 403,断开 VPN 立即恢复**——该拦截按出口 IP 判定,与账户/授权无关。想用出口切换刷新配额,需要**独享 IP**(自己的 Nord 账号,或自建 WireGuard 出口);VPN Gate 后端的定位是"零门槛的免费出口",适合普通 VPN 用途。
 
@@ -325,11 +338,19 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 | 工具调用失败/模型说工具不存在 | 多为桥接目录重建竞态;网关已等待 `command.updated`。若仍出现,查看日志中 `putBridge` 行 |
 | 免费层 403 (fingerprint) | 不要 deny `read`;会话权限必须保留 `allow read` |
 | 免费层 403 "can only be used from within OpenCode"(已登录也报) | 出口 IP 被上游标记(常见诱因:公共 VPN 出口);断开该 VPN / 回切家宽即恢复(`zero-window\net-back.ps1`;守卫也会自动清理残留的 `ccgw-vpngate` 连接)。与账户和授权无关 |
+| **家宽 IP 本身被标记**(2026-10-18 实测) | 症状:WARP 断开、走家宽时,连**桌面版 OpenCode 自己**都报同一句 403;重连 WARP 后同一账号立即恢复 → 判定按 IP、与账户无关。本机家宽(曼谷 AIS)已被标记。**处置(应急)**:`zero-window\net-guard.backend` 写 `warp`,并让两个计划任务在跑——`ccgw-warp-guard`(每 10 分钟检查,掉线自动重连、永不主动断开)与 `ccgw-warp-login`(登录后 25 秒连一次)。**这只是止血**:WARP 是共享出口,可能偶发软限流,指纹迟早也会被刷出来;根治要独享出口(见上「出口后端」),并减少共享指纹(公网转发按需开、账户池按需扩) |
 | 池里 3 个实例,但只登录了 1 个账号 | 正常:`total` 是实例数不是账号数;`accounts-status.ps1 -Live` 看每个实例的真实身份,未登录显示 `(anonymous / not logged in)`;`/health` 的 `pool.loggedIn` / `pool.anonymous` 是计数;同一账号登多个实例额度不叠加 |
 | 频繁 429 / 额度打满 | 加账户分摊:`zero-window\add-account.ps1 -Name acct2` → `login-account.ps1 -Name acct2` → 重启网关;`/health` 里看 `accounts` |
 | 全池限流但出口没自动切 | 查 `zero-window\net-guard.log`(每 ~10 分钟应有 heartbeat,没有说明守卫没在跑);确认没有 `net-guard.pause`、`/health` 里有 `pool` 字段;后端:装了 Nord 需已登录;没装 Nord 时 `auto` 默认不切换(需要免费出口就显式 `-Backend vpngate`,注意上方警示) |
 | 修改配置后不生效 | 重启网关进程;客户端会话也要重开 |
 | 想看执行细节 | 置 `CCGW_KEEP_SESSIONS=1` 后用 OpenCode 桌面版打开对应 `sessionID` |
+
+## 2026-10-18：403 与限流分开处理
+
+- `403 FreeTierError` 表示上游准入拒绝，不能据此认定账户额度耗尽。网关保留 403；不进行同一请求的账户轮换，也不设置 `pool.quotaExhausted`。
+- `401`、`429`、`503` 保留原始状态；流式请求在已经发送的 HTTP 200 内使用协议错误事件。日志增加 `upstreamStatus`、`errorKind`、`errorCode`，不记录认证信息。
+- 自动切换出口只影响网络，不等于修复上游准入。需要保持全机网络稳定时，在私有配置 `zero-window/net-guard.backend` 写入 `none`，并重启守卫。账户授权和网关密钥均不随此设置改变。
+- 离线回归：`node --test test-errors.mjs`；排名回归：`node test-ranking.mjs`。`test-formats.mjs` 是真实上游验收；上游 403 时验收失败，不能把离线通过写成模型服务恢复。
 
 ## License
 
