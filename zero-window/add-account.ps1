@@ -6,11 +6,11 @@
 # reads zero-window\accounts.json and spreads requests across all accounts.
 #
 # Usage:
-#   powershell -ExecutionPolicy Bypass -File zero-window\add-account.ps1 -Name acct2
-#   powershell -ExecutionPolicy Bypass -File zero-window\add-account.ps1 -Name acct2 -Port 4097
+#   powershell -ExecutionPolicy Bypass -File zero-window\add-account.ps1 -Name acct5
+#   powershell -ExecutionPolicy Bypass -File zero-window\add-account.ps1 -Name acct5 -Port 4100
 #
 # Then log the account in (one-time, opens a browser):
-#   powershell -ExecutionPolicy Bypass -File zero-window\login-account.ps1 -Name acct2
+#   powershell -ExecutionPolicy Bypass -File zero-window\login-account.ps1 -Name acct5
 #
 # And restart the gateway so the pool picks it up:
 #   Stop-ScheduledTask ccgw-gateway -ErrorAction SilentlyContinue; Start-ScheduledTask ccgw-gateway

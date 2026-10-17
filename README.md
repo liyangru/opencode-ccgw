@@ -96,7 +96,7 @@ Stop-ScheduledTask ccgw-gateway -ErrorAction SilentlyContinue; Start-ScheduledTa
 - **识别"是不是新账号"**:登录会写入该账户的隔离 profile,`login-account.ps1` 会把身份(如 `OpenCode Console / Personal`)与 credential id 记入 `accounts.json`;**额度只跟登录的账号绑定——同一账号登进多个实例不会增加总额度**(credential id 每次登录都可能变化,不能单独用它断定是不是同一账号——以 `accountID` / `email` 为准)。`zero-window\accounts-status.ps1` 可查看全部实例(Name / Port / Email / Identity / CredId / 冷却;加 `-Live` 从各隔离 profile 实时重读并刷新;未登录的显示 `(anonymous / not logged in)`);
 - 没有 `accounts.json` 时行为与单账户完全一致(向后兼容);删除该文件即可退回单账户;
 - 限流究竟按账户还是按 IP/设备判定取决于上游:**当前观察证据是"出口 IP 是主开关"**——同一出口 IP 被点名时,池内各实例 25 秒内接连被拒(实测 2026-10;当时本机只有 1 个账号的登录、其余为匿名实例——**不论实例/凭据/是否登录,同一 IP 一律被拒**),换回干净 IP 立即恢复。所以多账户的价值是"干净 IP 上的负载分摊",救不了 IP 级封禁;封禁靠下面的出口切换解决。
-- **实例 ≠ 账号**:`pool.total` / `pool.loggedIn` / `pool.anonymous` 分别是"实例数 / 已登录实例数 / 匿名实例数"——一个账号可以登录多个实例,**额度不会叠加**;未登录实例(如 acct3)以匿名身份承接请求,能分担并发但没有独立额度。要真正的多账户摊薄,每个实例必须登录**不同的账号**——看 `pool.distinctAccounts`(按 `email` 去重的账号数)。
+- **实例 ≠ 账号**:`pool.total` / `pool.loggedIn` / `pool.anonymous` 分别是"实例数 / 已登录实例数 / 匿名实例数"——一个账号可以登录多个实例,**额度不会叠加**;未登录实例(如某个还没登录的新实例)以匿名身份承接请求,能分担并发但没有独立额度。要真正的多账户摊薄,每个实例必须登录**不同的账号**——看 `pool.distinctAccounts`(按 `email` 去重的账号数)。
 
 ## 全池限流 → 自动切换出口(备用 VPN:WARP / Nord / VPN Gate)
 

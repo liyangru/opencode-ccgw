@@ -4,7 +4,7 @@
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File zero-window\setup.ps1
 # Add more accounts later (multi-account pool, spreads rate limits):
-#   powershell -ExecutionPolicy Bypass -File zero-window\add-account.ps1 -Name acct2
+#   powershell -ExecutionPolicy Bypass -File zero-window\add-account.ps1 -Name acct5
 # Options:
 #   -ServePort 4096                 headless OpenCode server port
 #   -GatewayPort 8317               ccgw gateway port
@@ -123,5 +123,5 @@ Write-Host "  gateway: $node server.mjs  ->  127.0.0.1:$GatewayPort"
 Write-Host ""
 Write-Host "Start now : zero-window\start.cmd"
 Write-Host "Stop      : zero-window\stop.cmd"
-Write-Host "Add more accounts (optional): zero-window\add-account.ps1 -Name acct2"
+Write-Host "Add more accounts (optional): zero-window\add-account.ps1 -Name acct5"
 Write-Host "(Both tasks start automatically at logon and restart on failure.)"
