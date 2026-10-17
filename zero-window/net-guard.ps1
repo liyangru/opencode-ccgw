@@ -91,6 +91,15 @@ $pausedShown = $false
 $beat = 0
 while ($true) {
   try {
+    # 自愈看门狗:ccgw-vpngate 只应由 vpngate 后端使用;其余情况下它的存在
+    # 都是残留(测试/手动遗留),会把整台机器静默留在(可能被上游标记的)公共出口上
+    if ($Backend -ne "vpngate") {
+      $vgc = Get-VpnConnection -Name "ccgw-vpngate" -ErrorAction SilentlyContinue
+      if ($vgc -and $vgc.ConnectionStatus -eq "Connected") {
+        LG "stale egress cleanup: disconnecting leftover ccgw-vpngate ($($vgc.ServerAddress))"
+        $null = VPngate-Disconnect
+      }
+    }
     if (Test-Path $pause) {
       if ($Once) { LG "paused - one-shot exits"; break }
       if (-not $pausedShown) { LG "paused (net-guard.pause present) - sleeping"; $pausedShown = $true }

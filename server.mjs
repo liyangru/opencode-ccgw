@@ -127,7 +127,7 @@ for (const a of accounts) {
   console.log("[ccgw] account " + a.name + " -> " + a.client.baseUrl + " " + (a.password ? "(auth ok)" : "(no password)"))
   a.client.startEventStream((e) => console.log("[ccgw] " + a.name + ": event stream error:", e.message))
 }
-console.log("[ccgw] mode:", POOL ? "account pool (" + accounts.length + " account(s))" : "single service")
+console.log("[ccgw] mode:", POOL ? "account pool (" + accounts.length + " instance(s))" : "single service")
 
 // Single-account mode only: the desktop app may restart its background service
 // on a new port; if the event stream drops and stays down, rediscover. Pool
@@ -255,14 +255,17 @@ function poolState() {
   const cooling = accounts.filter((a) => a.coolingUntil > now)
   const quotaExhausted =
     accounts.length > 0 && cooling.length === accounts.length && accounts.every((a) => a.lastLimited)
-  return { total: accounts.length, cooling: cooling.length, quotaExhausted }
+  // total/loggedIn/anonymous count INSTANCES, not distinct accounts: one account
+  // may be logged in on several instances, and that does not stack quota.
+  const loggedIn = accounts.filter((a) => a.identity).length
+  return { total: accounts.length, loggedIn, anonymous: accounts.length - loggedIn, cooling: cooling.length, quotaExhausted }
 }
 function notePoolState() {
   const s = poolState()
   if (s.quotaExhausted === lastQuotaState) return
   lastQuotaState = s.quotaExhausted
   if (s.quotaExhausted) {
-    console.log("[ccgw] [net] all " + accounts.length + " account(s) rate-limited - quota exhausted signal")
+    console.log("[ccgw] [net] all " + accounts.length + " instance(s) rate-limited - quota exhausted signal")
     logLine({ phase: "net", event: "quota-exhausted", accounts: accounts.map((a) => a.name) })
   } else {
     console.log("[ccgw] [net] quota state cleared")
