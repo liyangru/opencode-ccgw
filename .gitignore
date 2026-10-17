@@ -12,3 +12,8 @@ zero-window/gateway.vbs
 # multi-account provisioning (machine-local: paths, passwords, profiles)
 zero-window/accounts.json
 zero-window/accounts/
+
+# zero-window runtime state (machine-local)
+zero-window/nord-hwnd.txt
+zero-window/net-guard.pause
+zero-window/net-guard.toast

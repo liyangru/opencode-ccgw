@@ -16,7 +16,7 @@
 - **免费模型路由**:不匹配已知免费模型 ID 的模型名自动路由到默认模型(可用 `CCGW_MODEL` 配置)。
 - **零窗口模式**:登录自动启动(两个计划任务),无任何窗口;可完全不开桌面版使用。
 - **多账户账户池**:一账户一隔离实例(独立 profile / 端口 / 计划任务),网关轮询分摊请求,命中限流自动冷却并换户重试(见下文)。
-- **全池限流自动切出口**:所有账户同时被限流(IP 级限流信号)时,`net-guard` 自动把机器出口切到 NordVPN;一键 `net-back` 回切(需已安装登录 NordVPN,见下文)。
+- **全池限流自动切出口**:所有账户同时被限流(IP 级限流信号)时,`net-guard` 自动把机器出口切到 NordVPN(全程无窗口静默);一键 `net-back` 回切(需已安装登录 NordVPN,见下文)。
 - **CC Switch 深链生成**:一条命令生成 Claude Code / Codex 的一键导入链接。
 - **最小权限会话**:`[deny *, allow read, allow <bridge>_*]`——只保留 `read`(免费层要求请求包含 `read` 工具,否则 403)与桥接工具。
 - **JSONL 日志**:每请求一行:`reqId, dialect, requestedModel, model, bridge, sessionID, toolCalls, usage, durationMs`。
@@ -100,14 +100,15 @@ Stop-ScheduledTask ccgw-gateway -ErrorAction SilentlyContinue; Start-ScheduledTa
 
 若免费层限额按 IP 判定,加账户救不回;**所有账户同时因限流冷却**就是这个信号。ccgw 把它暴露为 `/health` 的 `pool` 对象(`total` / `cooling` / `quotaExhausted`),`zero-window\net-guard.ps1` 常驻监听并自动切换:
 
-- `quotaExhausted:true` 且 Nord 未连接 → 自动连上 NordVPN(UI 自动化,等同手动点按钮)→ 等待隧道就绪 → 弹通知;客户端重试即恢复出量;
-- 已在 Nord 上仍显示全池限流 → 通知提示"Nord 出口可能也被限,可换个节点"(不自动换节点,避免频繁换 IP);
-- 平时零动作。暂停:`zero-window` 下建 `net-guard.pause`;日志:`zero-window\net-guard.log`;自启:`setup.ps1` 检测到 NordVPN 时注册(计划任务;无管理员权限时退回注册表 Run 键)。
+- `quotaExhausted:true` 且 Nord 未连接 → 自动连上 NordVPN(UI 自动化,等同手动点按钮)→ 等待隧道就绪 → 客户端重试即恢复出量;
+- **全程静默**:操作窗口句柄在屏幕外加载后立即隐藏,不弹前台、不抢焦点(进程被完全退出时才可能闪现 <1 秒);守卫进程本身也无窗口(net-guard.vbs 启动);
+- 已在 Nord 上仍显示全池限流 → 日志提醒"Nord 出口可能也被限,可换个节点"(不自动换节点,避免频繁换 IP);
+- 平时零动作。暂停:`zero-window` 下建 `net-guard.pause`;日志:`zero-window\net-guard.log`(每 ~10 分钟一行 heartbeat,可判断守卫存活);切换时弹系统通知:建文件 `net-guard.toast`(默认关);自启:`setup.ps1` 检测到 NordVPN 时注册 `net-guard.vbs`(计划任务;无管理员权限时退回注册表 Run 键)。
 
 配套命令(均在 `zero-window\`):
 
 ```powershell
-.\nord-ctl.ps1 status|connect|disconnect   # 手动控制 NordVPN(UI 自动化)
+.\nord-ctl.ps1 status|connect|disconnect   # 手动控制 NordVPN(UI 自动化,静默)
 .\net-back.ps1                             # 一键回切:断开 Nord → 探测家宽 → 不通自动连回
 .\ip-check.ps1 [-Probe] [-Rebase]          # 出口 IP 体检(对比基线 / 经网关真请求)
 ```
@@ -225,7 +226,7 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 | 工具调用失败/模型说工具不存在 | 多为桥接目录重建竞态;网关已等待 `command.updated`。若仍出现,查看日志中 `putBridge` 行 |
 | 免费层 403 (fingerprint) | 不要 deny `read`;会话权限必须保留 `allow read` |
 | 频繁 429 / 额度打满 | 加账户分摊:`zero-window\add-account.ps1 -Name acct2` → `login-account.ps1 -Name acct2` → 重启网关;`/health` 里看 `accounts` |
-| 全池限流但出口没自动切 Nord | 查 `zero-window\net-guard.log`;确认 NordVPN 已安装并登录、没有 `net-guard.pause`、`/health` 里有 `pool` 字段 |
+| 全池限流但出口没自动切 Nord | 查 `zero-window\net-guard.log`(每 ~10 分钟应有 heartbeat,没有说明守卫没在跑);确认 NordVPN 已安装并登录、没有 `net-guard.pause`、`/health` 里有 `pool` 字段 |
 | 修改配置后不生效 | 重启网关进程;客户端会话也要重开 |
 | 想看执行细节 | 置 `CCGW_KEEP_SESSIONS=1` 后用 OpenCode 桌面版打开对应 `sessionID` |
 

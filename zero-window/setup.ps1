@@ -93,16 +93,16 @@ Register-ScheduledTask -TaskName "ccgw-gateway" -Action $act2 -Trigger $trg2 -Se
 # otherwise. Falls back to an HKCU Run entry when task registration is denied.
 $nordExe = "C:\Program Files\NordVPN\NordVPN.exe"
 if (Test-Path $nordExe) {
-  $ngScript = Join-Path $zw "net-guard.ps1"
+  $ngVbs = Join-Path $zw "net-guard.vbs"
   try {
-    $act3 = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ngScript`""
+    $act3 = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "`"$ngVbs`""
     $trg3 = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
     Register-ScheduledTask -TaskName "ccgw-netguard" -Action $act3 -Trigger $trg3 -Settings $set `
       -Description "ccgw: switch egress to NordVPN when the whole account pool is rate-limited" -Force | Out-Null
   } catch {
     Write-Warning "ccgw-netguard task not registered ($($_.Exception.Message)); using HKCU Run key"
     Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "ccgw-netguard" `
-      -Value ('powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $ngScript + '"')
+      -Value ('wscript.exe "' + $ngVbs + '"')
   }
 } else {
   Write-Host "(NordVPN not found - skipping ccgw-netguard auto-switch registration)"

@@ -3,13 +3,16 @@
 #     pool.quotaExhausted=true 且 Nord 未连接  -> 自动连上 Nord(UI 自动化)
 #     已在 Nord 上仍判定限流                    -> 提醒(Nord 出口可能也被限)
 #   暂停:在 zero-window 下新建文件 net-guard.pause
-#   日志:zero-window\net-guard.log
+#   日志:zero-window\net-guard.log(每 ~10 分钟写一行 heartbeat,便于确认存活)
+#   静默:用 net-guard.vbs 启动(无控制台);系统通知默认关闭,
+#         想要切换时弹通知就新建文件 zero-window\net-guard.toast
 param([switch]$Once, [switch]$ForceQuota)   # -Once: 只跑一轮(测试用); -ForceQuota: 假装"全池限流"(测试用)
 
 $ErrorActionPreference = "Continue"
 $zw = Split-Path -Parent $MyInvocation.MyCommand.Path
 $log = Join-Path $zw "net-guard.log"
 $pause = Join-Path $zw "net-guard.pause"
+$toastFile = Join-Path $zw "net-guard.toast"
 
 . (Join-Path $zw "nord-ctl.ps1")
 
@@ -20,6 +23,7 @@ function LG([string]$m) {
 }
 
 function Toast([string]$title, [string]$text) {
+  if (-not (Test-Path $toastFile)) { return }   # 默认静默;建 net-guard.toast 开启通知
   try {
     [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
     [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
@@ -33,6 +37,7 @@ function Toast([string]$title, [string]$text) {
 LG "net-guard started"
 $switched = $false
 $alarmSent = $false
+$beat = 0
 while ($true) {
   try {
     if (Test-Path $pause) { if ($Once) { LG "paused - one-shot exits"; break } else { Start-Sleep -Seconds 30; continue } }
@@ -65,6 +70,8 @@ while ($true) {
       if ($switched) { $switched = $false; LG "pool healthy again (staying on Nord until manual switch-back)" }
       $alarmSent = $false
     }
+    $beat++
+    if ($beat % 40 -eq 0) { LG ("heartbeat (quota=$q)") }
     if ($Once) { LG "one-shot done (quota=$q switched=$switched)"; break }
   } catch {
     # 网关不可达(重启/未启动)时忽略本轮
