@@ -97,7 +97,7 @@ function loadAccounts() {
             password = JSON.parse(fs.readFileSync(sf, "utf8")).password || ""
           } catch {}
         }
-        list.push({ name: String(a.name || "acct" + (list.length + 1)), baseUrl: String(a.url).replace(/\/+$/, ""), password, identity: a.identity || "", credentialId: a.credentialId || "" })
+        list.push({ name: String(a.name || "acct" + (list.length + 1)), baseUrl: String(a.url).replace(/\/+$/, ""), password, email: a.email || "", identity: a.identity || "", credentialId: a.credentialId || "" })
       }
       if (list.length) return { pool: true, list }
       console.log("[ccgw] accounts file has no usable entries; using single service")
@@ -115,6 +115,7 @@ const accounts = poolCfg.list.map((a) => ({
   name: a.name,
   client: new OpenCode({ baseUrl: a.baseUrl, password: a.password }),
   password: a.password,
+  email: a.email || "",
   identity: a.identity || "",
   credentialId: a.credentialId || "",
   coolingUntil: 0,
@@ -124,7 +125,7 @@ const accounts = poolCfg.list.map((a) => ({
   modelCache: { at: 0, ids: [], list: [] },
 }))
 for (const a of accounts) {
-  console.log("[ccgw] account " + a.name + " -> " + a.client.baseUrl + " " + (a.password ? "(auth ok)" : "(no password)"))
+  console.log("[ccgw] account " + a.name + (a.email ? " <" + a.email + ">" : "") + " -> " + a.client.baseUrl + " " + (a.password ? "(auth ok)" : "(no password)"))
   a.client.startEventStream((e) => console.log("[ccgw] " + a.name + ": event stream error:", e.message))
 }
 console.log("[ccgw] mode:", POOL ? "account pool (" + accounts.length + " instance(s))" : "single service")
@@ -258,7 +259,8 @@ function poolState() {
   // total/loggedIn/anonymous count INSTANCES, not distinct accounts: one account
   // may be logged in on several instances, and that does not stack quota.
   const loggedIn = accounts.filter((a) => a.identity).length
-  return { total: accounts.length, loggedIn, anonymous: accounts.length - loggedIn, cooling: cooling.length, quotaExhausted }
+  const distinctAccounts = new Set(accounts.map((a) => a.email).filter(Boolean)).size
+  return { total: accounts.length, loggedIn, distinctAccounts, anonymous: accounts.length - loggedIn, cooling: cooling.length, quotaExhausted }
 }
 function notePoolState() {
   const s = poolState()
@@ -546,6 +548,7 @@ const server = http.createServer(async (req, res) => {
           url: a.client.baseUrl,
           identity: a.identity || null,
           credentialId: a.credentialId || null,
+          email: a.email || null,
           eventStream: a.client.connected,
           coolingSeconds: Math.max(0, Math.ceil((a.coolingUntil - Date.now()) / 1000)),
           fails: a.fails,

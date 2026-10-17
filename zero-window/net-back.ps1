@@ -3,6 +3,7 @@
 $ErrorActionPreference = "Continue"
 $zw = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $zw "nord-cli.ps1")
+. (Join-Path $zw "egress-warp.ps1")
 . (Join-Path $zw "egress-vpngate.ps1")
 
 function Probe-Gateway {
@@ -22,6 +23,10 @@ if ((Nord-Status).state -eq "connected") {
   Write-Host "   检测到 Nord 已连接,正在断开..."
   if (-not (Nord-Disconnect)) { Write-Host "断开 Nord 失败,放弃(保持现状)"; exit 1 }
   $was = "nord"
+} elseif ((Warp-Status) -eq "connected") {
+  Write-Host "   检测到 WARP 已连接,正在断开..."
+  if (-not (Warp-Disconnect)) { Write-Host "断开 WARP 失败,放弃(保持现状)"; exit 1 }
+  $was = "warp"
 } elseif ((VPngate-Status) -eq "connected") {
   Write-Host "   检测到 VPN Gate 已连接,正在断开..."
   if (-not (VPngate-Disconnect)) { Write-Host "断开 VPN Gate 失败,放弃(保持现状)"; exit 1 }
@@ -44,15 +49,19 @@ if ($ok) {
   Write-Host "家宽正常,已回到直连(想再上备用出口说一声即可)。"
 } else {
   if ($was -eq "none") {
-    # 本来就没有备用出口在连:装了 Nord 就回 Nord;否则如实相告,不盲目连公共出口
-    if (Test-Path "C:\Program Files\NordVPN\NordVPN.exe") { $was = "nord" } else { $was = "" }
+    # 本来就没有备用出口在连:按 auto 策略回退(优先 WARP,其次 Nord);都没有就如实相告
+    $was = ""
+    if (Test-Path "C:\Program Files\NordVPN\NordVPN.exe") { $was = "nord" }
+    if (Warp-Registered) { $was = "warp" }
   }
   if ($was -eq "") {
-    Write-Host "家宽仍被限流,且本机没有可用的备用出口(装 NordVPN,或手动 .\egress-vpngate.ps1 connect;注意公共出口可能被上游拉黑)。"
+    Write-Host "家宽仍被限流,且本机没有可用的备用出口(推荐 Cloudflare WARP:winget install Cloudflare.Warp + warp-cli registration new;或装 NordVPN;VPN Gate 公共出口可能被上游拉黑)。"
   } else {
     Write-Host "家宽仍被限流,自动连回 $was..."
     if ($was -eq "nord") {
       if (Nord-Connect) { Write-Host "已连回 Nord。" } else { Write-Host "连回失败,请手动打开 Nord。" }
+    } elseif ($was -eq "warp") {
+      if (Warp-Connect) { Write-Host "已连回 WARP。" } else { Write-Host "连回失败,请手动运行 zero-window\egress-warp.ps1 connect。" }
     } else {
       if (VPngate-Connect) { Write-Host "已连回 VPN Gate。" } else { Write-Host "连回失败。" }
     }

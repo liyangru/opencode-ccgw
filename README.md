@@ -92,28 +92,29 @@ Stop-ScheduledTask ccgw-gateway -ErrorAction SilentlyContinue; Start-ScheduledTa
 行为:
 
 - 请求在账户间**轮询**;某账户命中限流(429 / quota / usage limit 等)或实例失联时进入**冷却**(默认 300s / 30s,可用 `CCGW_COOLDOWN_SECONDS`、`CCGW_DOWN_COOLDOWN_SECONDS` 调整;连续失败按指数延长,上限 30 分钟),且该回合会在**尚未向客户端输出任何内容**时自动换账户重试(已开始流式输出则不重试,避免重复内容);
-- `GET /health` 的 `accounts` 数组显示每个实例的连接状态、冷却倒计时、最近错误与**登录身份**(`identity` / `credentialId`;未登录的匿名实例为 `null`);日志每行带 `account` 字段;
-- **识别"是不是新账号"**:登录会写入该账户的隔离 profile,`login-account.ps1` 会把身份(如 `OpenCode Console / Personal`)与 credential id 记入 `accounts.json`;**额度只跟登录的账号绑定——同一账号登进多个实例不会增加总额度**(credential id 每次登录都可能变化,不能单独用它断定是不是同一账号)。`zero-window\accounts-status.ps1` 可查看全部实例(加 `-Live` 从各隔离 profile 实时重读并刷新;未登录的显示 `(anonymous / not logged in)`);
+- `GET /health` 的 `accounts` 数组显示每个实例的连接状态、冷却倒计时、最近错误与**登录身份**(`identity` / `credentialId` / `email` / `accountID`;未登录的匿名实例为 `null`);`pool` 里 `distinctAccounts` = 不同邮箱的**账号数**(摊薄看这个),`total` / `loggedIn` / `anonymous` 都是**实例数**;日志每行带 `account` 字段;
+- **识别"是不是新账号"**:登录会写入该账户的隔离 profile,`login-account.ps1` 会把身份(如 `OpenCode Console / Personal`)与 credential id 记入 `accounts.json`;**额度只跟登录的账号绑定——同一账号登进多个实例不会增加总额度**(credential id 每次登录都可能变化,不能单独用它断定是不是同一账号——以 `accountID` / `email` 为准)。`zero-window\accounts-status.ps1` 可查看全部实例(Name / Port / Email / Identity / CredId / 冷却;加 `-Live` 从各隔离 profile 实时重读并刷新;未登录的显示 `(anonymous / not logged in)`);
 - 没有 `accounts.json` 时行为与单账户完全一致(向后兼容);删除该文件即可退回单账户;
 - 限流究竟按账户还是按 IP/设备判定取决于上游:**当前观察证据是"出口 IP 是主开关"**——同一出口 IP 被点名时,池内各实例 25 秒内接连被拒(实测 2026-10;当时本机只有 1 个账号的登录、其余为匿名实例——**不论实例/凭据/是否登录,同一 IP 一律被拒**),换回干净 IP 立即恢复。所以多账户的价值是"干净 IP 上的负载分摊",救不了 IP 级封禁;封禁靠下面的出口切换解决。
-- **实例 ≠ 账号**:`pool.total` / `pool.loggedIn` / `pool.anonymous` 分别是"实例数 / 已登录实例数 / 匿名实例数"——一个账号可以登录多个实例,**额度不会叠加**;未登录实例(如 acct3)以匿名身份承接请求,能分担并发但没有独立额度。要真正的多账户摊薄,每个实例必须登录**不同的账号**。
+- **实例 ≠ 账号**:`pool.total` / `pool.loggedIn` / `pool.anonymous` 分别是"实例数 / 已登录实例数 / 匿名实例数"——一个账号可以登录多个实例,**额度不会叠加**;未登录实例(如 acct3)以匿名身份承接请求,能分担并发但没有独立额度。要真正的多账户摊薄,每个实例必须登录**不同的账号**——看 `pool.distinctAccounts`(按 `email` 去重的账号数)。
 
-## 全池限流 → 自动切换出口(备用 VPN:Nord / VPN Gate)
+## 全池限流 → 自动切换出口(备用 VPN:WARP / Nord / VPN Gate)
 
-若免费层限额按 IP 判定,加账户救不回;**所有实例同时因限流冷却**就是这个信号。ccgw 把它暴露为 `/health` 的 `pool` 对象(`total`=实例数、`loggedIn`=已登录实例数、`anonymous`=匿名实例数、`cooling`、`quotaExhausted`;实例数 ≠ 账号数),`zero-window\net-guard.ps1` 常驻监听并自动切换备用出口。
+若免费层限额按 IP 判定,加账户救不回;**所有实例同时因限流冷却**就是这个信号。ccgw 把它暴露为 `/health` 的 `pool` 对象(`total`=实例数、`loggedIn`=已登录实例数、`anonymous`=匿名实例数、`distinctAccounts`=不同账号数、`cooling`、`quotaExhausted`),`zero-window\net-guard.ps1` 常驻监听并自动切换备用出口。
 
-**出口后端**(`net-guard.ps1 -Backend` 参数,或一行文件 `zero-window\net-guard.backend` 写 `nord` / `vpngate` / `none`;默认 `auto`:装了 NordVPN 用 Nord,**没装则不自动切换**——公共 VPN 出口已被免费层按 IP 拉黑,自动切过去只会把"限流"升级成 403):
+**出口后端**(`net-guard.ps1 -Backend` 参数,或一行文件 `zero-window\net-guard.backend` 写 `warp` / `nord` / `vpngate` / `none`;默认 `auto`:装了并注册过 WARP 用 WARP(免费免登录),否则装了 NordVPN 用 Nord,**都没有则不自动切换**——公共 VPN(VPN Gate)出口已被免费层按 IP 拉黑,自动切过去只会把"限流"升级成 403):
 
 | 后端 | 账号 / 安装 | 说明 |
 |---|---|---|
+| `warp` | **零账号、零登录**(匿名设备注册) | [Cloudflare WARP](https://1.1.1.1/):`winget install Cloudflare.Warp` + `warp-cli --accept-tos registration new`;✅ 实测免费层放行(2026-10-17,经网关真请求正常返回;共享出口 IP 偶发软限流,交给账户池消化;见 `egress-warp.ps1`) |
 | `nord` | 需已登录的 NordVPN | 官方 CLI 通道,零窗口秒级(见 `nord-cli.ps1`) |
 | `vpngate` | **零账号、零安装** | [VPN Gate](https://www.vpngate.net/)(筑波大学公共 VPN):Windows 原生 L2TP/IPsec,凭据公开(vpn/vpn),无需管理员;⚠ 实测共享出口已被上游按 IP 标记,仅建议作普通 VPN 手动使用 |
-| `none` | 无 | 只监听并写日志提示(没装 Nord 时 `auto` 的默认值) |
+| `none` | 无 | 只监听并写日志提示(WARP / Nord 都没装时 `auto` 的默认值) |
 
 - `quotaExhausted:true` 且备用出口未连接 → 自动连接并等隧道就绪 → 客户端重试即可继续;
-- **全程静默**:Nord 走官方 CLI(仅当应用进程被完全退出时回退 UIA 冷启动);VPN Gate 走系统拨号——都不创建窗口、不弹前台;守卫进程本身也无窗口(net-guard.vbs 启动);
+- **全程静默**:Nord 走官方 CLI(仅当应用进程被完全退出时回退 UIA 冷启动);WARP 走 `warp-cli`;VPN Gate 走系统拨号——都不创建窗口、不弹前台;守卫进程本身也无窗口(net-guard.vbs 启动);
 - 已在备用出口上仍显示全池限流(**超过约 6 分钟冷却排水期**)→ 日志提醒"该出口可能也被限"(不自动换节点/换服务器,避免频繁换 IP);
-- 平时零动作。暂停:`zero-window` 下建 `net-guard.pause`;日志:`zero-window\net-guard.log`(每 ~10 分钟一行 heartbeat,可判断守卫存活);切换时弹系统通知:建文件 `net-guard.toast`(默认关);自启:`setup.ps1` 检测到 NordVPN 时注册 `net-guard.vbs`(计划任务;无管理员权限时退回注册表 Run 键)。没装 Nord 时 `auto` 不切换;想用免费出口需显式 `-Backend vpngate`(注意下方警示)。
+- 平时零动作。暂停:`zero-window` 下建 `net-guard.pause`;日志:`zero-window\net-guard.log`(每 ~10 分钟一行 heartbeat,可判断守卫存活);切换时弹系统通知:建文件 `net-guard.toast`(默认关);自启:`setup.ps1` 检测到 NordVPN 时注册 `net-guard.vbs`(计划任务;无管理员权限时退回注册表 Run 键)。WARP / Nord 都没装时 `auto` 不切换(VPN Gate 仍可显式 `-Backend vpngate`,注意上方警示)。
 - **残留自愈**:守卫每轮都检查 `ccgw-vpngate`——当前后端不是 `vpngate` 时,若发现它仍连着,判定为测试/手动残留,自动断开并记日志(`stale egress cleanup`);**`net-guard.pause` 暂停期间同样生效**,机器不会被静默留在公共出口上。
 
 > ⚠️ 实测警示(2026-10):**公共 VPN 的共享出口对"刷新免费额度"基本无效**——VPN Gate 的中继 IP 被全球用户共用,免费层很可能早已按其限流(实测连上后第一个请求即被拒:"free tier can only be used from within OpenCode",池内实例全部被连坐——当时本机只有 1 个账号、其余为匿名实例,证明按 IP 判定、与账户无关;换回干净出口立即恢复)。后续复测(2026-10-17):经 VPN Gate 出口时**即使重新登录授权,免费层请求仍全部 403,断开 VPN 立即恢复**——该拦截按出口 IP 判定,与账户/授权无关。想用出口切换刷新配额,需要**独享 IP**(自己的 Nord 账号,或自建 WireGuard 出口);VPN Gate 后端的定位是"零门槛的免费出口",适合普通 VPN 用途。

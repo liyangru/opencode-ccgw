@@ -2,8 +2,11 @@
 #   常驻循环,每 15s 读一次网关 /health:
 #     pool.quotaExhausted=true 且备用出口未连接 -> 自动连接并等隧道就绪(安静、无窗口)
 #     已在备用出口上仍判定限流(超过冷却排水期)-> 提醒(该出口可能也被限)
-#   备用出口后端(-Backend 参数,或一行文件 net-guard.backend 写 nord/vpngate/none):
-#     auto(默认)  = 装了 NordVPN 用 Nord;没装则不自动切换(等价 none)
+#   备用出口后端(-Backend 参数,或一行文件 net-guard.backend 写 warp/nord/vpngate/none):
+#     auto(默认)  = 装了并注册过 WARP 用 WARP(免费免登录);否则装了 NordVPN 用 Nord;
+#                   都没有则不自动切换(等价 none)
+#     warp        = Cloudflare WARP 免费出口(零账号、匿名注册;见 egress-warp.ps1;
+#                   实测免费层放行,2026-10-17)
 #     nord        = NordVPN 官方 CLI 通道(零窗口秒级;见 nord-cli.ps1)
 #     vpngate     = VPN Gate 公共免费出口(零账号、零安装;见 egress-vpngate.ps1)
 #                   ⚠ 实测共享出口已被上游按 IP 标记:切上去后免费层请求会被拒
@@ -15,7 +18,7 @@
 #         想要切换时弹通知就新建文件 zero-window/net-guard.toast
 param(
   [switch]$Once, [switch]$ForceQuota,     # -Once: 只跑一轮(测试用); -ForceQuota: 假装"全池限流"(测试用)
-  [ValidateSet("auto","nord","vpngate","none")][string]$Backend = "auto"
+  [ValidateSet("auto","warp","nord","vpngate","none")][string]$Backend = "auto"
 )
 
 $ErrorActionPreference = "Continue"
@@ -25,6 +28,7 @@ $pause = Join-Path $zw "net-guard.pause"
 $toastFile = Join-Path $zw "net-guard.toast"
 
 . (Join-Path $zw "nord-cli.ps1")
+. (Join-Path $zw "egress-warp.ps1")
 . (Join-Path $zw "egress-vpngate.ps1")
 
 # 后端选择:参数 > net-guard.backend 文件 > 自动(装了 Nord 用 Nord,否则 VPN Gate)
@@ -34,17 +38,20 @@ if ($Backend -eq "auto") {
     $v = ""
     $fc = Get-Content $bf -TotalCount 1 -ErrorAction SilentlyContinue
     if ($fc) { $v = "$fc".Trim().ToLower() }
-    if (@("nord","vpngate","none") -contains $v) { $Backend = $v }
+    if (@("warp","nord","vpngate","none") -contains $v) { $Backend = $v }
   }
 }
 if ($Backend -eq "auto") {
-  # 默认策略:有 Nord 用 Nord;否则不自动切 —— 公共 VPN Gate 出口实测已被免费层按 IP 拉黑,
-  # 自动切过去只会把"全池限流"升级成 403,对用户是负收益(要用请显式 -Backend vpngate)
+  # 默认策略:优先免费出口 —— 已注册 WARP 用 WARP;否则有 Nord 用 Nord;都没有则不自动切。
+  # 公共 VPN Gate 出口实测已被免费层按 IP 拉黑,自动切过去只会把"全池限流"升级成 403
+  # (要用请显式 -Backend vpngate)
   $Backend = "none"
   if (Test-Path "C:\Program Files\NordVPN\NordVPN.exe") { $Backend = "nord" }
+  if (Warp-Registered) { $Backend = "warp" }
 }
 $BackendName = "VPN Gate"
 if ($Backend -eq "nord") { $BackendName = "Nord" }
+if ($Backend -eq "warp") { $BackendName = "WARP" }
 if ($Backend -eq "none") { $BackendName = "none" }
 
 function LG([string]$m) {
@@ -70,6 +77,9 @@ function Egress-Status {
   if ("$((Get-NetAdapter -Name 'NordLynx' -ErrorAction SilentlyContinue).Status)" -eq "Up") {
     return @{ state = "connected"; detail = "nord(adapter=Up)" }
   }
+  if ((Warp-Status) -eq "connected") {
+    return @{ state = "connected"; detail = "warp" }
+  }
   $vg = Get-VpnConnection -Name "ccgw-vpngate" -ErrorAction SilentlyContinue
   if ($vg -and $vg.ConnectionStatus -eq "Connected") {
     return @{ state = "connected"; detail = "vpngate($($vg.ServerAddress))" }
@@ -79,6 +89,7 @@ function Egress-Status {
 
 function Egress-Connect {
   if ($Backend -eq "nord") { return [bool](Nord-Connect) }
+  if ($Backend -eq "warp") { return [bool](Warp-Connect) }
   if ($Backend -eq "vpngate") { return [bool](VPngate-Connect) }
   return $false
 }
@@ -113,7 +124,7 @@ while ($true) {
         # 没有可切的备用出口:每个限流周期只提示一次,不做任何动作
         if (-not $alarmSent) {
           $alarmSent = $true
-          LG "QUOTA EXHAUSTED (all accounts rate-limited) - no alternate egress configured (install NordVPN or set -Backend explicitly; see README)"
+          LG "QUOTA EXHAUSTED (all accounts rate-limited) - no alternate egress configured (install WARP or NordVPN, or set -Backend explicitly; see README)"
         }
       } elseif (-not $switched) {
         $st = Egress-Status

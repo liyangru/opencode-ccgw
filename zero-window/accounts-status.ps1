@@ -5,8 +5,9 @@
 #   / identity (e.g. "OpenCode Console / Personal (cred_...XAEPB)")
 #
 # Use it to verify a newly added account really is a different account:
-# a genuinely new login shows a different credential id, while logging the
-# same account in twice keeps the same one.
+# compare the accountID / email columns - a genuinely new account shows a
+# different one. (The credential id is NOT reliable: it changes on every
+# login, even for the same account.)
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File zero-window\accounts-status.ps1
@@ -80,17 +81,21 @@ foreach ($a in $cfg.accounts) {
 
   if ($Live -and $CliPath -and $listening) {
     Set-ProfileEnv $home2
-    $jtxt = (& $CliPath auth list --standalone --format json 2>&1 | Out-String)
+    $jtxt = (& $CliPath auth export --standalone 2>&1 | Out-String)
     try {
-      foreach ($i in ($jtxt | ConvertFrom-Json)) {
-        foreach ($c in $i.connections) {
-          $id = "$($i.name) / $($c.label)"
-          $cid = "$($c.id)"
-          if ($a.identity -ne $id -or $a.credentialId -ne $cid) {
-            $a | Add-Member -NotePropertyName identity -NotePropertyValue $id -Force
-            $a | Add-Member -NotePropertyName credentialId -NotePropertyValue $cid -Force
-            $updated = $true
-          }
+      foreach ($c in ($jtxt | ConvertFrom-Json)) {
+        $idName = "OpenCode Console"
+        if ($c.integrationID -and "$($c.integrationID)" -ne "opencode") { $idName = "$($c.integrationID)" }
+        $id = "$idName / $($c.label)"
+        $cid = "$($c.id)"
+        $mail = ""; $aid = ""
+        if ($c.value -and $c.value.metadata) { $mail = "$($c.value.metadata.email)"; $aid = "$($c.value.metadata.accountID)" }
+        if ($a.identity -ne $id -or $a.credentialId -ne $cid -or "$($a.email)" -ne $mail -or "$($a.accountID)" -ne $aid) {
+          $a | Add-Member -NotePropertyName identity -NotePropertyValue $id -Force
+          $a | Add-Member -NotePropertyName credentialId -NotePropertyValue $cid -Force
+          $a | Add-Member -NotePropertyName email -NotePropertyValue $mail -Force
+          $a | Add-Member -NotePropertyName accountID -NotePropertyValue $aid -Force
+          $updated = $true
         }
       }
     } catch {}
@@ -107,9 +112,11 @@ foreach ($a in $cfg.accounts) {
     $ha = $health.accounts | Where-Object { $_.name -eq $a.name }
     if ($ha) { $cool = "$($ha.coolingSeconds)s"; $fails = [string]$ha.fails }
   }
+  $email = ""
+  if ($a.email) { $email = [string]$a.email }
   $rows += [pscustomobject]@{
     Name = $a.name; Port = $port; Task = $taskState; Listening = $listening
-    Identity = $identity; CredId = $cred; Cooling = $cool; Fails = $fails
+    Email = $email; Identity = $identity; CredId = $cred; Cooling = $cool; Fails = $fails
   }
 }
 
