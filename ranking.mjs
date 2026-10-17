@@ -44,11 +44,13 @@ export const DEFAULT_ORDER = [
 ]
 
 // Slot mapping: haiku = small/fast + background, sonnet = workhorse,
-// opus = max power, vision = image/video/PDF tasks.
+// opus = max power, vision = image/video/PDF tasks. haiku points at glm:
+// measured 2-3s per request, while nemotron-3.5-lightning (fast by name)
+// actually took 13s-180s in the same test harness.
 export const DEFAULT_SLOTS = {
   opus: "deepseek-v4.1-flash-free",
   sonnet: "glm-5.3-flash-free",
-  haiku: "nemotron-3.5-lightning-free",
+  haiku: "glm-5.3-flash-free",
   vision: "glm-5.3-flash-free",
 }
 

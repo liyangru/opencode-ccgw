@@ -107,17 +107,17 @@ Stop-ScheduledTask ccgw-gateway -ErrorAction SilentlyContinue; Start-ScheduledTa
 | # | 模型 | 输入能力 | 优点 / 适合 |
 |---|---|---|---|
 | 1 | `deepseek-v4.1-flash-free` | 文本 + 图片 | 综合首选,编码/代理任务最稳;能看图(截图/OCR);200k 上下文 |
-| 2 | `glm-5.3-flash-free` | 文本 + 图片 + **视频** + **PDF** | 多模态首选:唯一能读 **PDF**;图片/视频理解;200k 上下文 |
+| 2 | `glm-5.3-flash-free` | 文本 + 图片 + **视频** + **PDF** | 多模态首选:唯一能读 **PDF**;图片/视频理解;200k 上下文;实测**响应最快**(2–3 秒) |
 | 3 | `nemotron-3.5-super-vl-free` | 文本 + 图片 | 最新视觉语言模型(2026-10-15);**1M 上下文** |
 | 4 | `beam-free` | 文本 | 501B 大模型(23B 激活):复杂推理/深度思考;1M 上下文 |
 | 5 | `longcat-2.5-preview-free` | 文本 + 图片 | 1M 上下文 + 图像理解:长文档/大代码库通读 |
 | 6 | `space-bunny-free` | 文本 + 图片 + **视频** | 匿名预览模型:1M 上下文、**54 万输出上限**(超长产出);稳定性不如正式模型 |
 | 7 | `mimo-v2.6-flash-free` | 文本 + 图片 + **音频** + **视频** | 唯一支持**音频**;闪速系列;200k 上下文 |
 | 8 | `nemotron-3-ultra-free` | 文本 | 550B 参数;1M 上下文(较老,2026-06) |
-| 9 | `nemotron-3.5-lightning-free` | 文本 | **最快**(专为速度设计):后台小任务首选;262k 上下文 |
+| 9 | `nemotron-3.5-lightning-free` | 文本 | 速度命名款,但实测反而**最慢**(单请求 13 秒~3 分钟,可超时):别当快模型用;262k 上下文 |
 | 10 | `big-pickle` | 文本 | 经典隐形免费模型;200k 上下文 |
 
-按需速查:**看图** → #1/#2/#3/#5/#6/#7 任意;**看视频** → #2(glm)/#6/#7;**读 PDF** → 只有 #2(glm);**听音频** → 只有 #7(mimo);**超长上下文** → #3 起(1M);**要最快** → #9。
+按需速查:**看图** → #1/#2/#3/#5/#6/#7 任意;**看视频** → #2(glm)/#6/#7;**读 PDF** → 只有 #2(glm);**听音频** → 只有 #7(mimo);**超长上下文** → #3 起(1M);**要最快** → #2(glm,实测 2–3 秒)。
 
 **模型槽位(Claude Code 这类"多个模型槽"的客户端)**:`model-ranks.json` 的 `slots` 把槽位名映射到免费模型——客户端即使发来硬编码名(如 `claude-haiku-4-5-20251001`)也会被路由到对应槽位的模型:
 
@@ -125,7 +125,7 @@ Stop-ScheduledTask ccgw-gateway -ErrorAction SilentlyContinue; Start-ScheduledTa
 |---|---|---|---|
 | `opus` | 含 `opus` / `fable` | #1 `deepseek-v4.1-flash-free` | 最强档 → 排名第一 |
 | `sonnet` | 含 `sonnet` | #2 `glm-5.3-flash-free` | 日常主力 → 排名第二(顺带多模态:视频/PDF 都能看) |
-| `haiku` | 含 `haiku` | #9 `nemotron-3.5-lightning-free` | 小/快模型 + 后台任务(标题、摘要)→ 最快的 |
+| `haiku` | 含 `haiku` | #2 `glm-5.3-flash-free` | 小/快模型 + 后台任务(标题、摘要)→ 实测最快(2–3 秒) |
 | `vision` | 恰为 `vision` / `image` / `vl` | #2 `glm-5.3-flash-free` | 图片/视频/PDF 专用入口 |
 
 槽位目标必须是免费模型;指向的模型当前不可用时自动落回排名第一。改排名或槽位都只改 `model-ranks.json`(热生效)。
@@ -138,7 +138,7 @@ export ANTHROPIC_AUTH_TOKEN="<口令>"                                       # �
 export ANTHROPIC_MODEL="deepseek-v4.1-flash-free"                  # 默认会话 → 排名 #1
 export ANTHROPIC_DEFAULT_OPUS_MODEL="deepseek-v4.1-flash-free"     # opus 槽 → 排名 #1(最强)
 export ANTHROPIC_DEFAULT_SONNET_MODEL="glm-5.3-flash-free"         # sonnet 槽 → 排名 #2(多模态主力)
-export ANTHROPIC_DEFAULT_HAIKU_MODEL="nemotron-3.5-lightning-free" # haiku 槽 + 后台任务 → 最快
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="glm-5.3-flash-free"          # haiku 槽 + 后台任务 → 实测最快
 export CLAUDE_CODE_SUBAGENT_MODEL="deepseek-v4.1-flash-free"       # 子代理 → 排名 #1
 export API_TIMEOUT_MS=600000                                       # 大模型首字较慢,放宽超时
 ```

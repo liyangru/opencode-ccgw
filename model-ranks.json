@@ -15,7 +15,7 @@
   "slots": {
     "opus": "deepseek-v4.1-flash-free",
     "sonnet": "glm-5.3-flash-free",
-    "haiku": "nemotron-3.5-lightning-free",
+    "haiku": "glm-5.3-flash-free",
     "vision": "glm-5.3-flash-free"
   }
 }

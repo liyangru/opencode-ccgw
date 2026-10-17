@@ -7,10 +7,10 @@ import { fileURLToPath } from "node:url"
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const MODEL = "deepseek-v4.1-flash-free" // rank #1 — 默认会话 + opus 槽
 const MODEL_SONNET = "glm-5.3-flash-free" // rank #2 — 多模态主力(sonnet 槽)
-const MODEL_HAIKU = "nemotron-3.5-lightning-free" // rank #9 — 最快(haiku 槽 + 后台任务)
+const MODEL_HAIKU = "glm-5.3-flash-free" // rank #2 — 实测最快(haiku 槽 + 后台任务)
 const GATEWAY = "http://127.0.0.1:8317"
 const NAME = "ccgw (OpenCode)"
-const NOTES = "本机 OpenCode 免费模型网关 ccgw (127.0.0.1:8317)。模型槽位按排名填好:opus=#1 DeepSeek V4.1 Flash(综合)、sonnet=#2 GLM 5.3 Flash(多模态/视频/PDF)、haiku=#9 Nemotron Lightning(最快)。"
+const NOTES = "本机 OpenCode 免费模型网关 ccgw (127.0.0.1:8317)。模型槽位按排名填好:opus=#1 DeepSeek V4.1 Flash(综合)、sonnet=#2 GLM 5.3 Flash(多模态/视频/PDF)、haiku=#2 GLM 5.3 Flash(实测最快)。"
 
 const enc = (s) => encodeURIComponent(s)
 const b64 = (s) => Buffer.from(s, "utf8").toString("base64")

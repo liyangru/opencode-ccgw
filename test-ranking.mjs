@@ -49,7 +49,7 @@ const base = { ids, freeSet, ranked, slots, pin: "", fallback: "deepseek-v4.1-fl
 
 assert.deepEqual(pickModel({ ...base, requested: "glm-5.3-flash-free" }), { model: "glm-5.3-flash-free", source: "requested" })
 assert.deepEqual(pickModel({ ...base, requested: "opencode/glm-5.3-flash-free" }), { model: "glm-5.3-flash-free", source: "requested" })
-assert.deepEqual(pickModel({ ...base, requested: "claude-haiku-4-5-20251001" }), { model: "nemotron-3.5-lightning-free", source: "slot:haiku" })
+assert.deepEqual(pickModel({ ...base, requested: "claude-haiku-4-5-20251001" }), { model: "glm-5.3-flash-free", source: "slot:haiku" })
 assert.deepEqual(pickModel({ ...base, requested: "claude-sonnet-4-5-20250929" }), { model: "glm-5.3-flash-free", source: "slot:sonnet" })
 assert.deepEqual(pickModel({ ...base, requested: "claude-opus-5-5" }), { model: "deepseek-v4.1-flash-free", source: "slot:opus" })
 assert.deepEqual(pickModel({ ...base, requested: "vision" }), { model: "glm-5.3-flash-free", source: "slot:vision" })
