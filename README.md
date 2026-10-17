@@ -130,7 +130,7 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 | `CCGW_HOST` | `127.0.0.1` | 监听地址(仅本机) |
 | `CCGW_MODEL` | `deepseek-v4.1-flash-free` | 默认模型(不匹配已知免费模型时使用) |
 | `CCGW_TOKEN` | 空 | 设置后要求 `Authorization: Bearer <token>` 或 `x-api-key` |
-| `CCGW_SCRATCH` | `%TEMP%\ccgw-scratch` | 会话 location / 桥接注册目录 |
+| `CCGW_SCRATCH` | `%TEMP%\ccgw-scratch` | 会话 location / 桥接注册目录(被清理后自动重建) |
 | `CCGW_MAX_CONCURRENCY` | `3` | 并发回合上限(排队) |
 | `CCGW_TURN_TIMEOUT` | `180000` | 单回合超时(ms) |
 | `CCGW_LOG` | `ccgw/ccgw.log` | JSONL 日志路径 |

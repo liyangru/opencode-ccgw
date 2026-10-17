@@ -365,6 +365,10 @@ export async function runTurn(oc, opts) {
   const permissions = [...READ_ONLY_PERMISSIONS]
   if (bridgeName) permissions.push({ action: bridgeName + "_*", resource: "*", effect: "allow" })
 
+  // Temp cleaners may delete the location directory while we run; recreate it
+  // so session creation does not fail with LocationNotFoundError.
+  fs.mkdirSync(dir, { recursive: true })
+
   const sess = await oc.reqOrThrow("POST", "/api/session", {
     title,
     model,

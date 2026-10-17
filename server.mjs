@@ -204,6 +204,10 @@ async function handleTurn({ dialect, body, req, res }) {
   const reqId = crypto.randomBytes(6).toString("hex")
   const t0 = Date.now()
 
+  // Temp cleaners may delete the scratch dir while the gateway runs; recreate
+  // it so model listing, bridge registration and session creation keep working.
+  try { fs.mkdirSync(SCRATCH, { recursive: true }) } catch {}
+
   const canon = dialect === "anthropic" ? parseAnthropic(body) : dialect === "openai" ? parseOpenAI(body) : parseResponses(body)
   applyToolChoice(canon, body.tool_choice)
 
