@@ -1,8 +1,9 @@
-﻿# net-back.ps1 -- 一键回切家宽:断开 Nord -> 探测 -> 不行就自动连回
+﻿# net-back.ps1 -- 一键回切家宽:断开备用出口(谁连着断谁)-> 探测 -> 不行就自动连回
 # 用途:你手动决定"试试回家宽直连"时运行;家宽还在限流的话不会把你晾着
 $ErrorActionPreference = "Continue"
 $zw = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $zw "nord-cli.ps1")
+. (Join-Path $zw "egress-vpngate.ps1")
 
 function Probe-Gateway {
   try {
@@ -15,8 +16,20 @@ function Probe-Gateway {
   }
 }
 
-Write-Host "1) 断开 Nord..."
-if (-not (Nord-Disconnect)) { Write-Host "断开失败,放弃(保持现状)"; exit 1 }
+Write-Host "1) 断开备用出口..."
+$was = "none"
+if ((Nord-Status).state -eq "connected") {
+  Write-Host "   检测到 Nord 已连接,正在断开..."
+  if (-not (Nord-Disconnect)) { Write-Host "断开 Nord 失败,放弃(保持现状)"; exit 1 }
+  $was = "nord"
+} elseif ((VPngate-Status) -eq "connected") {
+  Write-Host "   检测到 VPN Gate 已连接,正在断开..."
+  if (-not (VPngate-Disconnect)) { Write-Host "断开 VPN Gate 失败,放弃(保持现状)"; exit 1 }
+  $was = "vpngate"
+} else {
+  Write-Host "   当前没有备用出口连着,无需断开"
+  $null = VPngate-Disconnect   # 顺手清理可能残留的连接项
+}
 Start-Sleep -Seconds 2
 
 Write-Host "2) 探测家宽(经网关发测试请求)..."
@@ -28,8 +41,20 @@ foreach ($i in 1..2) {
 }
 
 if ($ok) {
-  Write-Host "家宽正常,已回到直连(想再上 Nord 说一声即可)。"
+  Write-Host "家宽正常,已回到直连(想再上备用出口说一声即可)。"
 } else {
-  Write-Host "家宽仍被限流,自动连回 Nord..."
-  if (Nord-Connect) { Write-Host "已连回 Nord。" } else { Write-Host "连回失败,请手动打开 Nord。" }
+  if ($was -eq "none") {
+    # 本来就没有备用出口在连:装了 Nord 就回 Nord;否则如实相告,不盲目连公共出口
+    if (Test-Path "C:\Program Files\NordVPN\NordVPN.exe") { $was = "nord" } else { $was = "" }
+  }
+  if ($was -eq "") {
+    Write-Host "家宽仍被限流,且本机没有可用的备用出口(装 NordVPN,或手动 .\egress-vpngate.ps1 connect;注意公共出口可能被上游拉黑)。"
+  } else {
+    Write-Host "家宽仍被限流,自动连回 $was..."
+    if ($was -eq "nord") {
+      if (Nord-Connect) { Write-Host "已连回 Nord。" } else { Write-Host "连回失败,请手动打开 Nord。" }
+    } else {
+      if (VPngate-Connect) { Write-Host "已连回 VPN Gate。" } else { Write-Host "连回失败。" }
+    }
+  }
 }

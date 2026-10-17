@@ -17,3 +17,5 @@ zero-window/accounts/
 zero-window/nord-hwnd.txt
 zero-window/net-guard.pause
 zero-window/net-guard.toast
+zero-window/net-guard.backend
+zero-window/egress-vpngate.last

@@ -16,7 +16,7 @@
 - **免费模型路由**:不匹配已知免费模型 ID 的模型名自动路由到默认模型(可用 `CCGW_MODEL` 配置)。
 - **零窗口模式**:登录自动启动(两个计划任务),无任何窗口;可完全不开桌面版使用。
 - **多账户账户池**:一账户一隔离实例(独立 profile / 端口 / 计划任务),网关轮询分摊请求,命中限流自动冷却并换户重试(见下文)。
-- **全池限流自动切出口**:所有账户同时被限流(IP 级限流信号)时,`net-guard` 自动把机器出口切到 NordVPN(官方 CLI 通道,零窗口、约 2 秒);一键 `net-back` 回切(需已安装登录 NordVPN,见下文)。
+- **全池限流自动切出口**:所有账户同时被限流(IP 级限流信号)时,`net-guard` 自动把机器出口切到备用 VPN——已装 NordVPN 用官方 CLI 通道(零窗口、约 2 秒);另有**免费免登录的 VPN Gate** 后端(Windows 原生 L2TP,零安装)可按需手动启用;一键 `net-back` 回切(见下文)。
 - **CC Switch 深链生成**:一条命令生成 Claude Code / Codex 的一键导入链接。
 - **最小权限会话**:`[deny *, allow read, allow <bridge>_*]`——只保留 `read`(免费层要求请求包含 `read` 工具,否则 403)与桥接工具。
 - **JSONL 日志**:每请求一行:`reqId, dialect, requestedModel, model, bridge, sessionID, toolCalls, usage, durationMs`。
@@ -94,27 +94,38 @@ Stop-ScheduledTask ccgw-gateway -ErrorAction SilentlyContinue; Start-ScheduledTa
 - `GET /health` 的 `accounts` 数组显示每个账户的连接状态、冷却倒计时、最近错误与**登录身份**(`identity` / `credentialId`);日志每行带 `account` 字段;
 - **识别"是不是新账号"**:登录会写入该账户的隔离 profile,`login-account.ps1` 会把身份(如 `OpenCode Console / Personal`)与 credential id 记入 `accounts.json`;同一账号重复登录 credential id 不变,新账号则不同。`zero-window\accounts-status.ps1` 查看全部账户(加 `-Live` 可从各隔离 profile 实时重读并刷新);
 - 没有 `accounts.json` 时行为与单账户完全一致(向后兼容);删除该文件即可退回单账户;
-- 限流究竟按账户还是按 IP/设备判定取决于上游:若按 IP,多账户收益有限——加好第二个账户后观察 `/health` 中的冷却记录即可验证。
+- 限流究竟按账户还是按 IP/设备判定取决于上游:**当前观察证据是"出口 IP 是主开关"**——同一批账户在被点名的出口 IP 上轮换没有任何作用(实测 2026-10:三个账户 25 秒内接连被拒),换回干净 IP 立即恢复。所以多账户的价值是"干净 IP 上的负载分摊",救不了 IP 级封禁;封禁靠下面的出口切换解决。
 
-## 全池限流 → 自动切换出口(NordVPN)
+## 全池限流 → 自动切换出口(备用 VPN:Nord / VPN Gate)
 
-若免费层限额按 IP 判定,加账户救不回;**所有账户同时因限流冷却**就是这个信号。ccgw 把它暴露为 `/health` 的 `pool` 对象(`total` / `cooling` / `quotaExhausted`),`zero-window\net-guard.ps1` 常驻监听并自动切换:
+若免费层限额按 IP 判定,加账户救不回;**所有账户同时因限流冷却**就是这个信号。ccgw 把它暴露为 `/health` 的 `pool` 对象(`total` / `cooling` / `quotaExhausted`),`zero-window\net-guard.ps1` 常驻监听并自动切换备用出口。
 
-- `quotaExhausted:true` 且 Nord 未连接 → 自动连上 NordVPN(调用 NordVPN.exe 官方 CLI,参数经应用单实例管道转发)→ 等待隧道就绪 → 客户端重试即恢复出量;
-- **全程静默**:首选官方 CLI 通道——不创建窗口、不弹前台、不抢焦点;仅当应用进程被完全退出时回退旧的 UIA 引擎(窗口在屏幕外材料化后立即隐藏,可能闪现 <1 秒);守卫进程本身也无窗口(net-guard.vbs 启动);
-- 已在 Nord 上仍显示全池限流 → 日志提醒"Nord 出口可能也被限,可换个节点"(不自动换节点,避免频繁换 IP);
-- 平时零动作。暂停:`zero-window` 下建 `net-guard.pause`;日志:`zero-window\net-guard.log`(每 ~10 分钟一行 heartbeat,可判断守卫存活);切换时弹系统通知:建文件 `net-guard.toast`(默认关);自启:`setup.ps1` 检测到 NordVPN 时注册 `net-guard.vbs`(计划任务;无管理员权限时退回注册表 Run 键)。
+**出口后端**(`net-guard.ps1 -Backend` 参数,或一行文件 `zero-window\net-guard.backend` 写 `nord` / `vpngate` / `none`;默认 `auto`:装了 NordVPN 用 Nord,**没装则不自动切换**——公共 VPN 出口已被免费层按 IP 拉黑,自动切过去只会把"限流"升级成 403):
+
+| 后端 | 账号 / 安装 | 说明 |
+|---|---|---|
+| `nord` | 需已登录的 NordVPN | 官方 CLI 通道,零窗口秒级(见 `nord-cli.ps1`) |
+| `vpngate` | **零账号、零安装** | [VPN Gate](https://www.vpngate.net/)(筑波大学公共 VPN):Windows 原生 L2TP/IPsec,凭据公开(vpn/vpn),无需管理员;⚠ 实测共享出口已被上游按 IP 标记,仅建议作普通 VPN 手动使用 |
+| `none` | 无 | 只监听并写日志提示(没装 Nord 时 `auto` 的默认值) |
+
+- `quotaExhausted:true` 且备用出口未连接 → 自动连接并等隧道就绪 → 客户端重试即可继续;
+- **全程静默**:Nord 走官方 CLI(仅当应用进程被完全退出时回退 UIA 冷启动);VPN Gate 走系统拨号——都不创建窗口、不弹前台;守卫进程本身也无窗口(net-guard.vbs 启动);
+- 已在备用出口上仍显示全池限流(**超过约 6 分钟冷却排水期**)→ 日志提醒"该出口可能也被限"(不自动换节点/换服务器,避免频繁换 IP);
+- 平时零动作。暂停:`zero-window` 下建 `net-guard.pause`;日志:`zero-window\net-guard.log`(每 ~10 分钟一行 heartbeat,可判断守卫存活);切换时弹系统通知:建文件 `net-guard.toast`(默认关);自启:`setup.ps1` 检测到 NordVPN 时注册 `net-guard.vbs`(计划任务;无管理员权限时退回注册表 Run 键)。没装 Nord 时 `auto` 不切换;想用免费出口需显式 `-Backend vpngate`(注意下方警示)。
+
+> ⚠️ 实测警示(2026-10):**公共 VPN 的共享出口对"刷新免费额度"基本无效**——VPN Gate 的中继 IP 被全球用户共用,免费层很可能早已按其限流(实测连上后第一个请求即被拒:"free tier can only be used from within OpenCode",三个账户全被连坐;换回干净出口立即恢复)。后续复测(2026-10-17):经 VPN Gate 出口时**即使重新登录授权,免费层请求仍全部 403,断开 VPN 立即恢复**——该拦截按出口 IP 判定,与账户/授权无关。想用出口切换刷新配额,需要**独享 IP**(自己的 Nord 账号,或自建 WireGuard 出口);VPN Gate 后端的定位是"零门槛的免费出口",适合普通 VPN 用途。
 
 配套命令(均在 `zero-window\`):
 
 ```powershell
-.\nord-cli.ps1 status|connect|disconnect   # 手动控制 NordVPN(官方 CLI,零窗口秒级;冷启动自动回退 UIA)
-.\nord-ctl.ps1 status|connect|disconnect   # 旧 UIA 引擎(备用/冷启动兜底)
-.\net-back.ps1                             # 一键回切:断开 Nord → 探测家宽 → 不通自动连回
-.\ip-check.ps1 [-Probe] [-Rebase]          # 出口 IP 体检(对比基线 / 经网关真请求)
+.\nord-cli.ps1 status|connect|disconnect              # 手动控制 NordVPN(官方 CLI,零窗口秒级;冷启动自动回退 UIA)
+.\nord-ctl.ps1 status|connect|disconnect              # 旧 UIA 引擎(备用/冷启动兜底)
+.\egress-vpngate.ps1 status|connect|disconnect|list  # VPN Gate 免费出口(零账号零安装;list 看服务器;重连自动优先上次成功服务器)
+.\net-back.ps1                                        # 一键回切:断开备用出口 → 探测家宽 → 不通自动连回
+.\ip-check.ps1 [-Probe] [-Rebase]                     # 出口 IP 体检(对比基线 / 经网关真请求)
 ```
 
-设计取舍:**固定使用同一个 Nord 出口**作为应急通道,回切保持手动(`net-back.ps1` 带防呆);不做节点自动轮换,避免频繁换 IP 招风控。
+设计取舍:**固定使用同一个备用出口**作为应急通道,回切保持手动(`net-back.ps1` 带防呆);不做节点自动轮换,避免频繁换 IP 招风控。
 
 ## 与 CC Switch 配合
 
@@ -226,8 +237,9 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 | `/health` 显示 `eventStream:false` | OpenCode 服务未运行或刚重启;网关每秒自动重连,持续异常运行 `zero-window\start.cmd`(零窗口模式) |
 | 工具调用失败/模型说工具不存在 | 多为桥接目录重建竞态;网关已等待 `command.updated`。若仍出现,查看日志中 `putBridge` 行 |
 | 免费层 403 (fingerprint) | 不要 deny `read`;会话权限必须保留 `allow read` |
+| 免费层 403 "can only be used from within OpenCode"(已登录也报) | 出口 IP 被上游标记(常见诱因:公共 VPN 出口);断开该 VPN / 回切家宽即恢复(`zero-window\net-back.ps1`)。与账户和授权无关 |
 | 频繁 429 / 额度打满 | 加账户分摊:`zero-window\add-account.ps1 -Name acct2` → `login-account.ps1 -Name acct2` → 重启网关;`/health` 里看 `accounts` |
-| 全池限流但出口没自动切 Nord | 查 `zero-window\net-guard.log`(每 ~10 分钟应有 heartbeat,没有说明守卫没在跑);确认 NordVPN 已安装并登录、没有 `net-guard.pause`、`/health` 里有 `pool` 字段 |
+| 全池限流但出口没自动切 | 查 `zero-window\net-guard.log`(每 ~10 分钟应有 heartbeat,没有说明守卫没在跑);确认没有 `net-guard.pause`、`/health` 里有 `pool` 字段;后端:装了 Nord 需已登录;没装 Nord 时 `auto` 默认不切换(需要免费出口就显式 `-Backend vpngate`,注意上方警示) |
 | 修改配置后不生效 | 重启网关进程;客户端会话也要重开 |
 | 想看执行细节 | 置 `CCGW_KEEP_SESSIONS=1` 后用 OpenCode 桌面版打开对应 `sessionID` |
 
