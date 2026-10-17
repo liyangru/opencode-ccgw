@@ -1,6 +1,6 @@
 ﻿# net-guard.ps1 -- 全池限流时自动把机器出口切到 NordVPN(全自动,无人值守)
 #   常驻循环,每 15s 读一次网关 /health:
-#     pool.quotaExhausted=true 且 Nord 未连接  -> 自动连上 Nord(UI 自动化)
+#     pool.quotaExhausted=true 且 Nord 未连接  -> 自动连上 Nord(官方 CLI 通道,零窗口秒级;见 nord-cli.ps1)
 #     已在 Nord 上仍判定限流                    -> 提醒(Nord 出口可能也被限)
 #   暂停:在 zero-window 下新建文件 net-guard.pause
 #   日志:zero-window\net-guard.log(每 ~10 分钟写一行 heartbeat,便于确认存活)
@@ -14,7 +14,7 @@ $log = Join-Path $zw "net-guard.log"
 $pause = Join-Path $zw "net-guard.pause"
 $toastFile = Join-Path $zw "net-guard.toast"
 
-. (Join-Path $zw "nord-ctl.ps1")
+. (Join-Path $zw "nord-cli.ps1")
 
 function LG([string]$m) {
   $line = (Get-Date -Format "yyyy-MM-dd HH:mm:ss") + "  " + $m

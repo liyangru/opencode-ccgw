@@ -2,7 +2,7 @@
 # 用途:你手动决定"试试回家宽直连"时运行;家宽还在限流的话不会把你晾着
 $ErrorActionPreference = "Continue"
 $zw = Split-Path -Parent $MyInvocation.MyCommand.Path
-. (Join-Path $zw "nord-ctl.ps1")
+. (Join-Path $zw "nord-cli.ps1")
 
 function Probe-Gateway {
   try {
