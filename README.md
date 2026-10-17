@@ -15,6 +15,7 @@
 - **真实会话**:每次请求 = 一次真实 OpenCode 会话;空闲会话按 `sessionID` 定时清扫。
 - **免费模型路由**:不匹配已知免费模型 ID 的模型名自动路由到默认模型(可用 `CCGW_MODEL` 配置)。
 - **零窗口模式**:登录自动启动(两个计划任务),无任何窗口;可完全不开桌面版使用。
+- **多账户账户池**:一账户一隔离实例(独立 profile / 端口 / 计划任务),网关轮询分摊请求,命中限流自动冷却并换户重试(见下文)。
 - **CC Switch 深链生成**:一条命令生成 Claude Code / Codex 的一键导入链接。
 - **最小权限会话**:`[deny *, allow read, allow <bridge>_*]`——只保留 `read`(免费层要求请求包含 `read` 工具,否则 403)与桥接工具。
 - **JSONL 日志**:每请求一行:`reqId, dialect, requestedModel, model, bridge, sessionID, toolCalls, usage, durationMs`。
@@ -30,7 +31,7 @@ Claude Code / Codex / Claude Desktop / 任意 Anthropic|OpenAI SDK
     ccgw(127.0.0.1:8317)
         │  OpenCode V2 HTTP API(/api/...)
         ▼
-OpenCode 服务(桌面版后台服务,或无头 opencode-cli serve)
+OpenCode 服务(桌面版后台服务,或无头 opencode-cli serve × N 账户池)
         ▼
    免费模型 / 任意已配置模型
 ```
@@ -61,6 +62,37 @@ zero-window\stop.cmd       # 停止(并禁用自启)
 
 - 桌面版与零窗口链**完全独立**:桌面版可随时开/关,互不影响。重新运行 `setup.ps1` 会重置密码并覆盖启动器。
 - 卸载:`Unregister-ScheduledTask ccgw-serve-headless,ccgw-gateway -Confirm:$false`,删除 `headless-service.json` 与两个 `.vbs` 即可。
+
+## 多账户(账户池)
+
+免费层额度按账户计算,单个账户容易被打满。ccgw 支持把请求分摊到多个 OpenCode 账户:每个账户跑**一个独立实例**(独立 profile + 独立端口 + 独立计划任务,互不共享登录态与会话库),网关侧做**轮询 + 冷却 + 自动重试**。
+
+```powershell
+# 1) 开通一个新账户实例(自动分配端口,创建隔离 profile 与计划任务)
+powershell -ExecutionPolicy Bypass -File zero-window\add-account.ps1 -Name acct2
+
+# 2) 浏览器登录该账户(一次性;--standalone 保证凭据写进它的隔离 profile)
+powershell -ExecutionPolicy Bypass -File zero-window\login-account.ps1 -Name acct2
+
+# 3) 重启网关,加载账户池
+Stop-ScheduledTask ccgw-gateway -ErrorAction SilentlyContinue; Start-ScheduledTask ccgw-gateway
+```
+
+配置在 `zero-window\accounts.json`(机器本地文件,含端口与密码文件路径,已 gitignore;`setup.ps1` 会自动生成含默认账户的版本):
+
+```json
+{ "accounts": [
+  { "name": "main",  "url": "http://127.0.0.1:4096", "serviceFile": "headless-service.json", "task": "ccgw-serve-headless" },
+  { "name": "acct2", "url": "http://127.0.0.1:4097", "serviceFile": "accounts/acct2/service.json", "task": "ccgw-serve-acct2" }
+] }
+```
+
+行为:
+
+- 请求在账户间**轮询**;某账户命中限流(429 / quota / usage limit 等)或实例失联时进入**冷却**(默认 300s / 30s,可用 `CCGW_COOLDOWN_SECONDS`、`CCGW_DOWN_COOLDOWN_SECONDS` 调整;连续失败按指数延长,上限 30 分钟),且该回合会在**尚未向客户端输出任何内容**时自动换账户重试(已开始流式输出则不重试,避免重复内容);
+- `GET /health` 的 `accounts` 数组显示每个账户的连接状态、冷却倒计时与最近错误;日志每行带 `account` 字段;
+- 没有 `accounts.json` 时行为与单账户完全一致(向后兼容);删除该文件即可退回单账户;
+- 限流究竟按账户还是按 IP/设备判定取决于上游:若按 IP,多账户收益有限——加好第二个账户后观察 `/health` 中的冷却记录即可验证。
 
 ## 与 CC Switch 配合
 
@@ -120,7 +152,7 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 | POST | `/v1/chat/completions` | OpenAI Chat Completions(流式、工具) |
 | POST | `/v1/responses` | OpenAI Responses / Codex(流式、函数调用) |
 | GET | `/v1/models` | 免费模型列表(带 `anthropic-version` 头返回 Anthropic 形状,否则 OpenAI 形状) |
-| GET | `/health` | 状态 + 当前模型 + OpenCode 地址 |
+| GET | `/health` | 状态 + 账户池(每个账户的连接/冷却)+ 模型列表 |
 
 ## 环境变量
 
@@ -137,6 +169,9 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 | `CCGW_KEEP_SESSIONS` | 空 | `1` = 不删除 OpenCode 会话(调试用) |
 | `CCGW_OPENCODE_URL` | 自动发现 | 强制指定 OpenCode 服务地址 |
 | `CCGW_SERVICE_FILE` | `~/.config/opencode/service.json` | 密码文件路径(配 `CCGW_OPENCODE_URL` 可固定指向任意服务) |
+| `CCGW_ACCOUNTS_FILE` | 空 | 账户池配置(accounts.json);文件存在时启用多账户轮询 | 
+| `CCGW_COOLDOWN_SECONDS` | `300` | 命中限流后该账户的冷却时长(秒) |
+| `CCGW_DOWN_COOLDOWN_SECONDS` | `30` | 账户实例失联后的冷却时长(秒) |
 
 ## 验证与日志
 
@@ -169,6 +204,7 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 | `/health` 显示 `eventStream:false` | OpenCode 服务未运行或刚重启;网关每秒自动重连,持续异常运行 `zero-window\start.cmd`(零窗口模式) |
 | 工具调用失败/模型说工具不存在 | 多为桥接目录重建竞态;网关已等待 `command.updated`。若仍出现,查看日志中 `putBridge` 行 |
 | 免费层 403 (fingerprint) | 不要 deny `read`;会话权限必须保留 `allow read` |
+| 频繁 429 / 额度打满 | 加账户分摊:`zero-window\add-account.ps1 -Name acct2` → `login-account.ps1 -Name acct2` → 重启网关;`/health` 里看 `accounts` |
 | 修改配置后不生效 | 重启网关进程;客户端会话也要重开 |
 | 想看执行细节 | 置 `CCGW_KEEP_SESSIONS=1` 后用 OpenCode 桌面版打开对应 `sessionID` |
 

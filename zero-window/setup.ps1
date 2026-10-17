@@ -3,6 +3,8 @@
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File zero-window\setup.ps1
+# Add more accounts later (multi-account pool, spreads rate limits):
+#   powershell -ExecutionPolicy Bypass -File zero-window\add-account.ps1 -Name acct2
 # Options:
 #   -ServePort 4096                 headless OpenCode server port
 #   -GatewayPort 8317               ccgw gateway port
@@ -65,6 +67,7 @@ env("CCGW_MODEL") = "$Model"
 env("CCGW_PORT") = "$GatewayPort"
 env("CCGW_OPENCODE_URL") = "http://127.0.0.1:$ServePort"
 env("CCGW_SERVICE_FILE") = "$zw\headless-service.json"
+env("CCGW_ACCOUNTS_FILE") = "$zw\accounts.json"
 env("CCGW_LOG") = "$root\ccgw.log"
 sh.CurrentDirectory = "$root"
 rc = sh.Run("""$node"" ""$root\server.mjs""", 0, True)
@@ -85,6 +88,14 @@ $trg2.Delay = "PT20S"
 Register-ScheduledTask -TaskName "ccgw-gateway" -Action $act2 -Trigger $trg2 -Settings $set `
   -Description "ccgw: gateway on 127.0.0.1:$GatewayPort" -Force | Out-Null
 
+# --- account pool config (seeded with the headless server above; add more
+# accounts later with zero-window\add-account.ps1, then restart the gateway)
+$accountsFile = Join-Path $zw "accounts.json"
+if (-not (Test-Path $accountsFile)) {
+  $seed = @{ accounts = @(@{ name = "main"; url = "http://127.0.0.1:$ServePort"; serviceFile = "headless-service.json"; task = "ccgw-serve-headless" }) }
+  [IO.File]::WriteAllText($accountsFile, ($seed | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
+}
+
 Write-Host ""
 Write-Host "Done. Zero-window chain configured:"
 Write-Host "  server : $CliPath serve  ->  127.0.0.1:$ServePort"
@@ -92,4 +103,5 @@ Write-Host "  gateway: $node server.mjs  ->  127.0.0.1:$GatewayPort"
 Write-Host ""
 Write-Host "Start now : zero-window\start.cmd"
 Write-Host "Stop      : zero-window\stop.cmd"
+Write-Host "Add more accounts (optional): zero-window\add-account.ps1 -Name acct2"
 Write-Host "(Both tasks start automatically at logon and restart on failure.)"

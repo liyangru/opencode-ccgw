@@ -69,67 +69,174 @@ const KEEP_SESSIONS = process.env.CCGW_KEEP_SESSIONS === "1"
 fs.mkdirSync(SCRATCH, { recursive: true })
 
 // ---------------------------------------------------------------------------
-// OpenCode client + live model list
+// Account pool + live model list
+//
+// One OpenCode service per account. With CCGW_ACCOUNTS_FILE set (accounts.json
+// listing {name, url, serviceFile}), requests are spread round-robin across
+// accounts; an account that hits a rate limit or goes down is put on cooldown
+// and the turn is retried on the next account before anything has been sent
+// to the client. Without the file, the gateway behaves exactly like before:
+// one discovered service, no rotation.
 
-const { baseUrl, password } = discoverService()
-console.log("[ccgw] OpenCode service:", baseUrl, password ? "(auth ok)" : "(no password found!)")
-const oc = new OpenCode({ baseUrl, password })
-oc.startEventStream((e) => console.log("[ccgw] event stream error:", e.message))
+const ACCOUNTS_FILE = process.env.CCGW_ACCOUNTS_FILE || ""
+const COOLDOWN_SECONDS = Number(process.env.CCGW_COOLDOWN_SECONDS || 300)
+const DOWN_COOLDOWN_SECONDS = Number(process.env.CCGW_DOWN_COOLDOWN_SECONDS || 30)
 
-// The desktop app may restart the background service on a new port. If the
-// event stream drops and stays down, re-run discovery and reconnect.
-let rediscovering = false
-setInterval(async () => {
-  if (oc.connected || rediscovering) return
-  rediscovering = true
-  try {
-    const d = discoverService()
-    if (d.baseUrl !== oc.baseUrl || d.password !== password) {
-      console.log("[ccgw] service moved:", oc.baseUrl, "->", d.baseUrl)
-      oc.baseUrl = d.baseUrl
-      oc.auth = "Basic " + Buffer.from("opencode:" + (d.password || "")).toString("base64")
-      oc.stopEventStream()
-      await sleep(150)
-      oc.startEventStream((e) => console.log("[ccgw] event stream error:", e.message))
+function loadAccounts() {
+  if (ACCOUNTS_FILE && fs.existsSync(ACCOUNTS_FILE)) {
+    try {
+      const cfg = JSON.parse(fs.readFileSync(ACCOUNTS_FILE, "utf8"))
+      const base = path.dirname(ACCOUNTS_FILE)
+      const list = []
+      for (const a of Array.isArray(cfg.accounts) ? cfg.accounts : []) {
+        if (!a || !a.url) continue
+        let password = ""
+        if (a.serviceFile) {
+          const sf = path.isAbsolute(a.serviceFile) ? a.serviceFile : path.join(base, a.serviceFile)
+          try {
+            password = JSON.parse(fs.readFileSync(sf, "utf8")).password || ""
+          } catch {}
+        }
+        list.push({ name: String(a.name || "acct" + (list.length + 1)), baseUrl: String(a.url).replace(/\/+$/, ""), password })
+      }
+      if (list.length) return { pool: true, list }
+      console.log("[ccgw] accounts file has no usable entries; using single service")
+    } catch (e) {
+      console.log("[ccgw] accounts file unusable, falling back to single service:", e.message)
     }
-  } catch (e) {
-    console.log("[ccgw] rediscovery failed:", e.message)
-  } finally {
-    rediscovering = false
   }
-}, 15000)
+  const d = discoverService()
+  return { pool: false, list: [{ name: "default", baseUrl: d.baseUrl, password: d.password }] }
+}
+
+const poolCfg = loadAccounts()
+const POOL = poolCfg.pool
+const accounts = poolCfg.list.map((a) => ({
+  name: a.name,
+  client: new OpenCode({ baseUrl: a.baseUrl, password: a.password }),
+  password: a.password,
+  coolingUntil: 0,
+  fails: 0,
+  lastError: null,
+  modelCache: { at: 0, ids: [], list: [] },
+}))
+for (const a of accounts) {
+  console.log("[ccgw] account " + a.name + " -> " + a.client.baseUrl + " " + (a.password ? "(auth ok)" : "(no password)"))
+  a.client.startEventStream((e) => console.log("[ccgw] " + a.name + ": event stream error:", e.message))
+}
+console.log("[ccgw] mode:", POOL ? "account pool (" + accounts.length + " account(s))" : "single service")
+
+// Single-account mode only: the desktop app may restart its background service
+// on a new port; if the event stream drops and stays down, rediscover. Pool
+// accounts point at fixed headless servers and reconnect on their own.
+if (!POOL) {
+  const primary = accounts[0]
+  let rediscovering = false
+  setInterval(async () => {
+    if (primary.client.connected || rediscovering) return
+    rediscovering = true
+    try {
+      const d = discoverService()
+      if (d.baseUrl !== primary.client.baseUrl || d.password !== primary.password) {
+        console.log("[ccgw] service moved:", primary.client.baseUrl, "->", d.baseUrl)
+        primary.client.baseUrl = d.baseUrl
+        primary.password = d.password
+        primary.client.auth = "Basic " + Buffer.from("opencode:" + (d.password || "")).toString("base64")
+        primary.client.stopEventStream()
+        await sleep(150)
+        primary.client.startEventStream((e) => console.log("[ccgw] event stream error:", e.message))
+      }
+    } catch (e) {
+      console.log("[ccgw] rediscovery failed:", e.message)
+    } finally {
+      rediscovering = false
+    }
+  }, 15000)
+}
 
 // Throwaway sessions are cleaned up by an idle sweep instead of per request:
 // deleting a session seconds after creating it races with clients that sync
 // sessions (the desktop app prefetches every session.created event and toasts
-// "Session not found" when its fetch lands after the delete).
+// "Session not found" when its fetch lands after the delete). Each account has
+// its own session store, so sweep them all.
 if (!KEEP_SESSIONS) {
-  const sweep = () =>
-    sweepOldSessions(oc, { dir: SCRATCH, log: (m) => logLine({ phase: "sweep", msg: m }) })
-      .then((n) => {
-        if (n) console.log("[ccgw] swept", n, "idle session(s)")
-      })
-      .catch(() => {})
-  sweep()
+  const sweepAll = async () => {
+    for (const a of accounts) {
+      try {
+        const n = await sweepOldSessions(a.client, { dir: SCRATCH, log: (m) => logLine({ phase: "sweep", msg: a.name + ": " + m }) })
+        if (n) console.log("[ccgw] " + a.name + ": swept", n, "idle session(s)")
+      } catch {}
+    }
+  }
+  sweepAll()
   const every = Number(process.env.CCGW_SWEEP_INTERVAL_MINUTES || 10)
-  if (every > 0) setInterval(sweep, every * 60 * 1000).unref()
+  if (every > 0) setInterval(sweepAll, every * 60 * 1000).unref()
 }
 
-let modelCache = { at: 0, ids: [], list: [] }
-async function knownModels() {
-  if (Date.now() - modelCache.at < 60000 && modelCache.ids.length) return modelCache
+async function accountModels(a) {
+  if (Date.now() - a.modelCache.at < 60000 && a.modelCache.ids.length) return a.modelCache
   try {
-    const r = await oc.req("GET", "/api/model?location[directory]=" + encodeURIComponent(SCRATCH))
+    const r = await a.client.req("GET", "/api/model?location[directory]=" + encodeURIComponent(SCRATCH))
     const data = r.json?.data || []
-    modelCache = {
+    a.modelCache = {
       at: Date.now(),
       ids: data.map((m) => m.id),
       list: data.map((m) => ({ id: m.id, name: m.name || m.id, providerID: m.providerID || "opencode" })),
     }
   } catch (e) {
-    console.log("[ccgw] model list fetch failed:", e.message)
+    console.log("[ccgw] " + a.name + ": model list fetch failed:", e.message)
   }
-  return modelCache
+  return a.modelCache
+}
+
+// Union of every account's model list (in practice the lists are identical;
+// the union keeps routing correct while accounts are cooling down or booting).
+async function knownModels() {
+  const ids = new Set()
+  const list = []
+  for (const a of accounts) {
+    const c = await accountModels(a)
+    for (const m of c.list) {
+      if (ids.has(m.id)) continue
+      ids.add(m.id)
+      list.push(m)
+    }
+  }
+  return { ids: [...ids], list }
+}
+
+// ---------------------------------------------------------------------------
+// Account selection: round-robin, skipping cooling accounts
+
+const RATE_LIMIT_RE = /429|too many requests|rate.?limit|quota|usage limit|usage exceeded|limit reached|limit exceeded|hit your limit|free (tier|usage)|slow down|try again (later|in)|subscribe|capacity/i
+const UNAVAILABLE_RE = /fetch failed|ECONNREFUSED|ECONNRESET|socket hang up|EHOSTUNREACH|ECONNABORTED|networkerror/i
+
+let rr = 0
+function pickAccount(tried) {
+  const now = Date.now()
+  const fresh = accounts.filter((a) => !tried.has(a.name))
+  const avail = fresh.filter((a) => a.coolingUntil <= now)
+  const candidates = avail.length ? avail : fresh
+  const pick = candidates[rr % candidates.length]
+  rr++
+  return pick
+}
+
+function coolDown(a, reason, seconds) {
+  // consecutive failures double the cooldown (a fully spent quota should not
+  // be retried every few minutes); markOk() resets it after a success
+  const secs = Math.min(seconds * 2 ** a.fails, 1800)
+  a.coolingUntil = Math.max(a.coolingUntil, Date.now() + secs * 1000)
+  a.fails++
+  a.lastError = reason
+  console.log("[ccgw] cooldown " + a.name + " for " + secs + "s: " + reason)
+  logLine({ phase: "cooldown", account: a.name, seconds: secs, msg: reason })
+}
+
+function markOk(a) {
+  a.fails = 0
+  a.lastError = null
+  a.coolingUntil = 0
 }
 
 // ---------------------------------------------------------------------------
@@ -264,25 +371,74 @@ async function handleTurn({ dialect, body, req, res }) {
   let sid = null
   let result = null
   let error = null
+  let account = null
+  let emitted = false
+  const tried = new Set()
   try {
     await sem.acquire()
     try {
-      if (bridgeName) {
-        await putBridge(oc, SCRATCH, bridgeName, manifest.file, { log: (_, m) => logLine({ reqId, phase: "bridge", msg: m }) })
+      for (let attempt = 0; attempt < accounts.length; attempt++) {
+        const a = pickAccount(tried)
+        tried.add(a.name)
+        account = a
+        let r = null
+        let e = null
+        let bridgeOk = false
+        try {
+          if (bridgeName) {
+            await putBridge(a.client, SCRATCH, bridgeName, manifest.file, { log: (_, m) => logLine({ reqId, phase: "bridge", account: a.name, msg: m }) })
+            bridgeOk = true
+          }
+          r = await runTurn(a.client, {
+            dir: SCRATCH,
+            model: { providerID: "opencode", id: model },
+            promptText,
+            bridgeName,
+            sanToOrig: nameMap?.sanToOrig,
+            onTextDelta: (d) => {
+              if (stream) {
+                emitted = true
+                stream.onDelta(d)
+              }
+            },
+            signal: ac.signal,
+            timeoutMs: TURN_TIMEOUT,
+            title: "ccgw " + dialect + " " + reqId,
+            log: (_, m) => logLine({ reqId, phase: "turn", account: a.name, msg: m }),
+          })
+        } catch (err) {
+          e = err
+        } finally {
+          if (bridgeOk) {
+            try {
+              await deleteBridge(a.client, SCRATCH, bridgeName)
+            } catch {}
+          }
+        }
+
+        const failMsg = e ? String(e.message || e) : r?.error ? String(r.error.message || r.error) : null
+        if (!failMsg) {
+          result = r
+          sid = r.sessionID
+          markOk(a)
+          break
+        }
+
+        const clientGone = ac.signal.aborted
+        const limited = RATE_LIMIT_RE.test(failMsg)
+        const down = UNAVAILABLE_RE.test(failMsg)
+        if (!clientGone) {
+          if (limited) coolDown(a, "rate-limited: " + failMsg.slice(0, 160), COOLDOWN_SECONDS)
+          else if (down) coolDown(a, "unreachable: " + failMsg.slice(0, 160), DOWN_COOLDOWN_SECONDS)
+        }
+        const rotatable = !clientGone && !emitted && attempt < accounts.length - 1 && (limited || down)
+        if (rotatable) {
+          logLine({ reqId, phase: "rotate", account: a.name, msg: "failed (" + (limited ? "rate limited" : "unreachable") + "), trying next account: " + failMsg.slice(0, 160) })
+          continue
+        }
+        error = e || new Error(failMsg)
+        break
       }
-      result = await runTurn(oc, {
-        dir: SCRATCH,
-        model: { providerID: "opencode", id: model },
-        promptText,
-        bridgeName,
-        sanToOrig: nameMap?.sanToOrig,
-        onTextDelta: (d) => stream?.onDelta(d),
-        signal: ac.signal,
-        timeoutMs: TURN_TIMEOUT,
-        title: "ccgw " + dialect + " " + reqId,
-        log: (_, m) => logLine({ reqId, phase: "turn", msg: m }),
-      })
-      sid = result.sessionID
     } finally {
       sem.release()
     }
@@ -291,17 +447,12 @@ async function handleTurn({ dialect, body, req, res }) {
   } finally {
     res.removeListener("close", onClose)
     if (manifest) removeManifest(manifest.dir)
-    if (bridgeName) {
-      try {
-        await deleteBridge(oc, SCRATCH, bridgeName)
-      } catch {}
-    }
   }
 
   const durationMs = Date.now() - t0
   if (error || result?.error) {
     const message = String(error?.message || result?.error?.message || "turn failed")
-    logLine({ reqId, dialect, requestedModel: canon.model, model, stream: canon.stream, tools: canon.tools.length, bridge: bridgeName, sessionID: sid, durationMs, error: message })
+    logLine({ reqId, account: account?.name, dialect, requestedModel: canon.model, model, stream: canon.stream, tools: canon.tools.length, bridge: bridgeName, sessionID: sid, durationMs, error: message })
     if (stream) {
       stream.fail(error || new Error(message))
       res.end()
@@ -314,6 +465,7 @@ async function handleTurn({ dialect, body, req, res }) {
   const toolNames = result.toolCalls.map((c) => c.name)
   logLine({
     reqId,
+    account: account?.name,
     dialect,
     requestedModel: canon.model,
     model,
@@ -350,11 +502,19 @@ const server = http.createServer(async (req, res) => {
       const models = await knownModels()
       return json(res, 200, {
         ok: true,
-        opencode: oc.baseUrl,
-        eventStream: oc.connected,
+        opencode: accounts[0].client.baseUrl,
+        eventStream: accounts[0].client.connected,
         models: models.ids,
         defaultModel: FALLBACK_MODEL,
         scratch: SCRATCH,
+        accounts: accounts.map((a) => ({
+          name: a.name,
+          url: a.client.baseUrl,
+          eventStream: a.client.connected,
+          coolingSeconds: Math.max(0, Math.ceil((a.coolingUntil - Date.now()) / 1000)),
+          fails: a.fails,
+          lastError: a.lastError,
+        })),
       })
     }
 
@@ -405,7 +565,7 @@ server.listen(PORT, HOST, () => {
 
 process.on("SIGINT", () => {
   console.log("[ccgw] shutting down")
-  oc.stopEventStream()
+  for (const a of accounts) a.client.stopEventStream()
   server.close(() => process.exit(0))
   setTimeout(() => process.exit(0), 1500)
 })
