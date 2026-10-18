@@ -448,6 +448,16 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 - 自动切换出口只影响网络，不等于修复上游准入。当前备用出口为 WARP，掉线由 `warp-guard` 自动重连,按用户要求保留`ccgw-netguard` 待命,回切家宽仍为手动;账户授权和网关密钥均不随网络状态改变。
 - 离线回归：`node --test test-errors.mjs`；排名回归：`node test-ranking.mjs`。`test-formats.mjs` 是真实上游验收；上游 403 时验收失败，不能把离线通过写成模型服务恢复。
 
+## 2026-10-18：输出预算截断不再触发整链降级
+
+- 上游在输出预算过小时会返回 `Response still truncated after two output token limit continuations`。这属于**请求参数**问题，不是模型或账户故障。
+- 网关把上游输出预算下限设为 **512 tokens**；命中截断时只对**同一模型**按 4 倍递增预算（上限 8192）重试，最多两次；仍失败才返回 400 `invalid_request_error`，日志 `errorCode=output_limit`。
+- 截断不再进入模型级降级链。此前一次 `max_tokens:16` 的请求会依次烧掉 glm、nemotron、mimo、deepseek、beam、space-bunny 六个模型、耗时 20 秒以上；修复后同一请求一次命中（实测未知模型请求从 21 秒降到 0.9 秒）。
+- 空 `messages` / 空 `input` 在进入账户池前直接 400（`messages: at least one message is required`），避免空请求复用上游会话状态。
+- 成功日志的 `model` 字段改为**实际服务该回合的模型**；发生降级时不再误报原始槽位模型，`modelSource` 仍保留原始来源。
+- `test-all.cmd` 会自动切到脚本所在目录，可在仓库根直接运行。
+- 离线回归新增 4 条：空 messages、截断同模型重试、截断耗尽 400 不降级、降级后成功日志模型（`test-errors.mjs` 共 24 条）。
+
 ## 2026-10-18：IPv4 准入拒绝的本机修复
 
 同账户官方客户端对照(2026-10-18 04:20)显示 IPv4 返回 FreeTierError、IPv6 正常;同日 07:33 同一家宽 IPv4 用官方客户端已恢复正常——该拒绝是偶发软限流,不是永久封禁,遇到先重试。现有 8317 增加仅限本机、带认证、仅允许 opencode.ai:443 的透明 CONNECT，四个专用后台进程优先 IPv6；不修改 TLS/客户端身份，不开启 VPN。原账号、会话和工具权限保留。DeepSeek、Claude Messages、Codex Responses、官方桌面服务经 ccgw 及外部工具往返均已真实成功。启动配置已持久保存，凭据只在进程内解密。出口运行状态见 `/health.egress`（`preferredFamily:6`，失败自动回退 IPv4）。详见 [修复与验证记录](RATE_LIMIT_RETRY.md)。
@@ -469,7 +479,7 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
    - 排名改为按实测延迟排（`beam` 0.7s 最快），但 `opus` 与 `vision` 两个槽位**不随延迟走**，仍指向能看图且稳定的 `deepseek` 与 `nemotron-3.5-super-vl-free`。
    - `test-ranking.mjs` 的 top-5 能力表同步改为实测结论，并修正了原 fixture 中 `beam-free` 被重复键覆盖成 `["text"]` 的笔误——那会让“top-5 必须有视觉模型”这条约束永远失效。
 3. **一次更正**：当日本会话曾据 `curl` 探针下的“WARP 也 403”判断该出口同样被拒，那是**探测方式的问题**——探针缺少真实客户端指纹，` https://opencode.ai/zen/v1/chat/completions` 对任何非 OpenCode 指纹都返回 `FreeTierError`。用真实 OpenCode 后台进程走同一条 WARP 代理重测：WARP 出口 `succeeded`，家宽出口同机同时刻返回 `FreeTierError`。**判断出口是否被拒，必须走网关/真实客户端，不能用裸 curl 探针。**
-4. **模型实测延迟（WARP 出口，本机）**：`beam` 0.69s、`space-bunny` 1.09s、`jev` 2.26s、`nemotron-3-ultra` 2.22s、`longcat` 3.56s、`mimo` 5.12s、`big-pickle` 7.20s、`glm` 6.84s、`nemotron-3.5-lightning` 12.29s、`deepseek` 29.61s、`nemotron-3.5-super-vl` 42.65s。前 3 名用 `max_tokens=24` 会触发本地“截断续跑”误判，须用 ≥300 tokens 重测。
+4. **模型实测延迟（WARP 出口，本机）**：`beam` 0.69s、`space-bunny` 1.09s、`jev` 2.26s、`nemotron-3-ultra` 2.22s、`longcat` 3.56s、`mimo` 5.12s、`big-pickle` 7.20s、`glm` 6.84s、`nemotron-3.5-lightning` 12.29s、`deepseek` 29.61s、`nemotron-3.5-super-vl` 42.65s。前 3 名用 `max_tokens=24` 会触发上游截断；网关现在会把预算抬到 ≥512 并对同一模型重试，但测延迟仍建议 ≥300 tokens，避免把重试耗时算进模型延迟。
 
 ## 2026-10-18：WARP 出口轮换（自治，只为 ccgw）
 

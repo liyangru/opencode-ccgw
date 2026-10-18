@@ -3,6 +3,7 @@ rem ccgw offline regression runner.
 rem Every suite below is a local simulation: no upstream calls, no quota use.
 rem Exit code 0 means all green.
 setlocal enabledelayedexpansion
+pushd "%~dp0"
 set FAIL=0
 for %%T in (
   test-errors
@@ -35,4 +36,5 @@ node test-egress-ssh.mjs
 if errorlevel 1 set FAIL=1
 echo.
 if "!FAIL!"=="1" (echo OFFLINE SUITE: FAILED) else (echo OFFLINE SUITE: ALL GREEN)
+popd
 exit /b !FAIL!

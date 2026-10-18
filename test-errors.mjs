@@ -97,6 +97,7 @@ async function fixture(error, run, options = {}) {
     await run({
       turns: () => turns,
       hits: () => hits,
+      log: () => fs.readFileSync(path.join(dir, "gateway.log"), "utf8"),
       health: async () => (await fetch(base + "/health")).json(),
       post: (route, body) => fetch(base + route, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
     })
@@ -126,6 +127,51 @@ test('invalid budgets fail as 400 while the server stays alive', async () => {
     assert.equal(f.turns(),0)
     assert.ok(await f.health())
   })
+})
+
+test('empty messages are rejected before touching the pool', async () => {
+  await fixture(null, async (f) => {
+    const r = await f.post('/v1/messages', { model: body.model, messages: [] })
+    assert.equal(r.status, 400)
+    assert.match((await r.json()).error.message, /at least one message/)
+    assert.equal(f.turns(), 0)
+  })
+})
+
+test('output-limit truncation retries the same model with a larger budget instead of walking the chain', async () => {
+  await fixture(({ turn }) => turn === 1
+    ? { type: 'provider.internal', status: 502, message: 'Response still truncated after two output token limit continuations' }
+    : null, async (f) => {
+    const r = await f.post('/v1/messages', { ...body, max_tokens: 16 })
+    assert.equal(r.status, 200)
+    const hits = f.hits()
+    assert.equal(hits.length, 2)
+    assert.deepEqual(hits.map((h) => h.model), ['deepseek-v4.1-flash-free', 'deepseek-v4.1-flash-free'])
+  }, { models: ['deepseek-v4.1-flash-free', 'glm-5.3-flash-free'] })
+})
+
+test('persistent output-limit truncation fails as 400 without walking the model chain', async () => {
+  await fixture({ type: 'provider.internal', status: 502, message: 'Response still truncated after two output token limit continuations' }, async (f) => {
+    const r = await f.post('/v1/messages', { ...body, max_tokens: 16 })
+    assert.equal(r.status, 400)
+    const hits = f.hits()
+    assert.equal(hits.length, 3)
+    assert.ok(hits.every((h) => h.model === 'deepseek-v4.1-flash-free'))
+    assert.equal((await f.health()).pool.cooling, 0)
+  }, { models: ['deepseek-v4.1-flash-free', 'glm-5.3-flash-free'] })
+})
+
+test('success log reports the model that actually served after a fallback', async () => {
+  await fixture(({ turn }) => turn === 1
+    ? { type: 'provider.internal', status: 502, message: 'Upstream request failed: Endpoint is unavailable.' }
+    : null, async (f) => {
+    const r = await f.post('/v1/messages', { model: 'claude-opus-5', max_tokens: 64, messages: [{ role: 'user', content: 'diagnostic' }] })
+    assert.equal(r.status, 200)
+    assert.deepEqual(f.hits().map((h) => h.model), ['glm-5.3-flash-free', 'deepseek-v4.1-flash-free'])
+    const done = f.log().trim().split('\n').map((l) => JSON.parse(l)).filter((l) => l.reqId && l.textLen !== undefined).pop()
+    assert.equal(done.model, 'deepseek-v4.1-flash-free')
+    assert.equal(done.modelSource, 'slot:opus')
+  }, { models: ['glm-5.3-flash-free', 'deepseek-v4.1-flash-free'] })
 })
 
 test("free-tier 403 stays forbidden without account rotation or quota signal", async () => {

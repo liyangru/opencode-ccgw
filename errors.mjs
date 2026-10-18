@@ -2,6 +2,11 @@
 // In particular, a FreeTierError must never trigger quota/account rotation.
 const RATE_LIMIT = /\b429\b|too many requests|rate[ -]?limit|quota (?:exceeded|exhausted)|usage (?:limit exceeded|exceeded)|free (?:tier|usage) (?:limit )?(?:exceeded|exhausted)|limit (?:reached|exceeded)|hit your limit/i
 const NETWORK = /fetch failed|ECONNREFUSED|ECONNRESET|socket hang up|EHOSTUNREACH|ECONNABORTED|networkerror/i
+// The upstream reports "Response still truncated after two output token limit
+// continuations" when the model burned the whole output budget on reasoning.
+// That is a request-parameter problem (max_tokens too small), not a model or
+// account failure: it must not rotate accounts or walk the fallback chain.
+const OUTPUT_LIMIT = /still truncated|output token limit/i
 
 function retryAfter(error) {
   if (Number.isFinite(error?.retryAfterMs) && error.retryAfterMs > 0) return error.retryAfterMs / 1000
@@ -24,9 +29,10 @@ export function classifyError(error) {
   const rawStatus = Number(error?.status ?? error?.statusCode ?? error?.response?.status)
   const explicitStatus = Number.isInteger(rawStatus) && rawStatus >= 400 && rawStatus <= 599 ? rawStatus : null
   const freeTier = /FreeTierError/i.test(providerType) || /free tier can only be used from within OpenCode/i.test(message)
-  const status = explicitStatus ?? (freeTier ? 403 : RATE_LIMIT.test(message) ? 429 : 502)
-  const kind = status === 401 ? "authentication" : status === 403 ? "access_denied" : status === 429 ? "rate_limit" : NETWORK.test(message) ? "network" : "upstream"
-  const code = freeTier && status === 403 ? "free_tier_access_denied" : kind === "authentication" ? "authentication_error" : kind === "access_denied" ? "access_denied" : kind === "rate_limit" ? "rate_limit_exceeded" : "upstream_error"
-  const type = kind === "authentication" ? "authentication_error" : kind === "access_denied" ? "permission_error" : kind === "rate_limit" ? "rate_limit_error" : "api_error"
+  const outputLimit = OUTPUT_LIMIT.test(message)
+  const status = outputLimit ? 400 : explicitStatus ?? (freeTier ? 403 : RATE_LIMIT.test(message) ? 429 : 502)
+  const kind = outputLimit ? "request" : status === 401 ? "authentication" : status === 403 ? "access_denied" : status === 429 ? "rate_limit" : NETWORK.test(message) ? "network" : "upstream"
+  const code = outputLimit ? "output_limit" : freeTier && status === 403 ? "free_tier_access_denied" : kind === "authentication" ? "authentication_error" : kind === "access_denied" ? "access_denied" : kind === "rate_limit" ? "rate_limit_exceeded" : "upstream_error"
+  const type = outputLimit ? "invalid_request_error" : kind === "authentication" ? "authentication_error" : kind === "access_denied" ? "permission_error" : kind === "rate_limit" ? "rate_limit_error" : "api_error"
   return { message, status, kind, code, type, retryAfterSeconds: retryAfter(error) }
 }

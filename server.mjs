@@ -69,6 +69,11 @@ const LOG_FILE = process.env.CCGW_LOG || path.join(__dirname, "ccgw.log")
 const TOKEN = process.env.CCGW_TOKEN || ""
 const MAX_CONCURRENCY = Number(process.env.CCGW_MAX_CONCURRENCY || 3)
 const TURN_TIMEOUT = Number(process.env.CCGW_TURN_TIMEOUT || 180000)
+// Free models spend part of the output budget on hidden reasoning. A client
+// asking for a tiny max_tokens (e.g. 16) otherwise makes the upstream fail with
+// "Response still truncated ...", which used to walk the whole model chain.
+const MIN_OUTPUT_BUDGET = 512
+const MAX_OUTPUT_BUDGET = 8192
 const KEEP_SESSIONS = process.env.CCGW_KEEP_SESSIONS === "1"
 const STATE_FILE = process.env.CCGW_STATE_FILE || path.join(__dirname,'.ccgw-state.json')
 let egress = null
@@ -422,6 +427,12 @@ async function handleTurn({ dialect, body, req, res }) {
 
   const canon = dialect === "anthropic" ? parseAnthropic(body) : dialect === "openai" ? parseOpenAI(body) : parseResponses(body)
   applyToolChoice(canon, body.tool_choice)
+  // An empty conversation used to be forwarded upstream, where the model would
+  // answer from whatever session state it had. Every supported API requires at
+  // least one message; reject it before touching the pool.
+  if (!canon.messages.length) {
+    return json(res, 400, errorShape(dialect, "messages: at least one message is required", 400, "invalid_request"))
+  }
 
   const models = await knownModels()
   if (ac.signal.aborted || res.destroyed) return
@@ -491,6 +502,14 @@ async function handleTurn({ dialect, body, req, res }) {
   let emitted = false
   const tried = new Set()
   let activeModel = model
+  // The model that actually served the turn (may differ from the requested slot
+  // after a model-level fallback). activeModel is cleared on success, so keep a
+  // copy for the log line.
+  let usedModel = null
+  // Give the upstream room for hidden reasoning even when the client asks for a
+  // tiny response. The client-facing text is still what the model returns.
+  let outputBudget = canon.maxOutputTokens ? Math.max(Number(canon.maxOutputTokens) || 0, MIN_OUTPUT_BUDGET) : undefined
+  let outputRetries = 0
   try {
     await sem.acquire()
     try {
@@ -503,6 +522,11 @@ async function handleTurn({ dialect, body, req, res }) {
         if (ac.signal.aborted) throw new Error("Client disconnected")
         const a = pickAccount(tried, activeModel)
         if (!a) {
+          // A truncation retry must never turn into a model-chain walk.
+          if (outputRetries > 0) {
+            error = new Error("output token limit: no account available to retry the same model")
+            break
+          }
           // No account is usable for this model: either every account was
           // already tried for it, or all of them are cooling for it. If the
           // chain has another model, advance to it (per-model cooldowns differ);
@@ -535,7 +559,7 @@ async function handleTurn({ dialect, body, req, res }) {
             dir: SCRATCH,
             model: { providerID: "opencode", id: activeModel },
             promptText,
-            maxOutputTokens: canon.maxOutputTokens,
+            maxOutputTokens: outputBudget,
             files: canon.files,
             bridgeName,
             sanToOrig: nameMap?.sanToOrig,
@@ -566,6 +590,7 @@ async function handleTurn({ dialect, body, req, res }) {
         if (!failMsg) {
           result = r
           sid = r.sessionID
+          usedModel = activeModel
           markOk(a, activeModel, started)
           activeModel = null // success: leave both loops
           break
@@ -573,6 +598,23 @@ async function handleTurn({ dialect, body, req, res }) {
 
         const clientGone = ac.signal.aborted
         const failure = classifyError(e || r?.error || new Error(failMsg))
+        // Output-limit truncation is not a model/account failure. Retry the same
+        // model with a larger budget instead of walking the ranked chain (which
+        // used to burn six models and ~20s on a max_tokens:16 request).
+        if (failure.code === "output_limit" && !clientGone && !emitted) {
+          const current = outputBudget || 0
+          const bumped = Math.min(Math.max(current * 4, MIN_OUTPUT_BUDGET), MAX_OUTPUT_BUDGET)
+          if (outputRetries < 2 && bumped > current) {
+            logLine({ reqId, phase: "output-budget", account: a.name, from: current, to: bumped, msg: "upstream truncated at the output token limit; retrying the same model with a larger budget" })
+            outputBudget = bumped
+            outputRetries++
+            tried.delete(a.name)
+            attempt--
+            continue
+          }
+          error = e || r?.error || new Error(failMsg)
+          break
+        }
         const limited = failure.kind === "rate_limit"
         const down = failure.kind === "network"
         if (!clientGone) {
@@ -625,7 +667,7 @@ async function handleTurn({ dialect, body, req, res }) {
   if (error || result?.error) {
     const failure = classifyError(error || result?.error)
     const message = failure.message
-    logLine({ reqId, account: account?.name, dialect, requestedModel: canon.model, model, modelSource: pick.source, stream: canon.stream, tools: canon.tools.length, bridge: bridgeName, sessionID: sid, durationMs, error: message, upstreamStatus: failure.status, errorKind: failure.kind, errorCode: failure.code })
+    logLine({ reqId, account: account?.name, dialect, requestedModel: canon.model, model: usedModel || activeModel || model, modelSource: pick.source, stream: canon.stream, tools: canon.tools.length, bridge: bridgeName, sessionID: sid, durationMs, error: message, upstreamStatus: failure.status, errorKind: failure.kind, errorCode: failure.code })
     if (stream) {
       stream.fail(failure)
       res.end()
@@ -644,7 +686,7 @@ async function handleTurn({ dialect, body, req, res }) {
     account: account?.name,
     dialect,
     requestedModel: canon.model,
-    model,
+    model: usedModel || model,
     modelSource: pick.source,
     stream: canon.stream,
     tools: canon.tools.length,
