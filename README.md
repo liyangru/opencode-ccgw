@@ -14,12 +14,13 @@
 - **真实工具往返**:动态注册 stdio MCP 桥接 → 捕获模型发起的工具调用 → 中断回合 → 把调用按客户端方言返回;工具结果随下一次请求回到模型。支持**并行工具调用**。
 - **真实会话**:每次请求 = 一次真实 OpenCode 会话;空闲会话按 `sessionID` 定时清扫。
 - **请求输出预算**:三种协议的输出 token 上限传入受管会话,由网关专用 `budget-plugin` 的 OpenCode 原生 hook 设置模型调用上限;插件未激活时返回 503,不静默忽略预算。
-- **明确的输入边界**:当前桥接支持文本与工具调用。图片、音频、视频、PDF 等附件尚未转发,请求包含不支持的附件时明确返回 400。
+- **输入边界**:支持文本、工具调用与**内嵌图片**(PNG/JPEG/WebP/GIF,上限 20 张且解码后合计 15MB;仅 `data:` 内嵌)。音频、视频、PDF 与远程图片网址/本地路径明确返回 400,不静默丢弃。
 - **免费模型路由**:不匹配已知免费模型 ID 的模型名自动路由到默认模型(可用 `CCGW_MODEL` 配置)。
 - **零窗口模式**:登录自动启动(两个计划任务),无任何窗口;可完全不开桌面版使用。
 - **多账户账户池**:一账户一隔离实例(独立 profile / 端口 / 计划任务),网关轮询分摊请求,命中限流自动冷却并换户重试(见下文)。
 - **可选自动切出口**:所有已知免费模型在全池均进入限流冷却时,`net-guard` 按已有配置处理备用 VPN;此信号本身不能确定上游按 IP 限流。可通过 `net-guard.pause` 暂停自动切换,一键 `net-back` 回切(见下文)。
-- **可选备用出口保活**:`warp-guard` 可在启用后检查 WARP 连接;使用 `warp-guard.pause` 暂停。本次部署按用户要求保持 VPN 关闭,不把网络切换视为恢复免费额度的方法。
+- **备用出口保活**:`warp-guard`(计划任务 `ccgw-warp-guard`,登录时 + 每 ~10 分钟,`wscript` 无窗口)只在 WARP 掉线时自动重连,**永不主动断开**;暂停:`warp-guard.pause`。回切家宽仍是手动动作。网络切换只是止血,不等同于额度恢复。
+- **上游出口优选 IPv6**:原生 OpenCode 后端的上游连接优先走本机原生 IPv6(失败自动回退 IPv4),仅作用于 `opencode.ai:443`、仅限本机回环且带认证;运行状态见 `/health.egress`。
 - **CC Switch 深链生成**:一条命令生成 Claude Code / Codex 的一键导入链接。
 - **最小权限会话**:`[deny *, allow read, allow <bridge>_*]`——只保留 `read` 与桥接工具。该权限配置不代表能通过上游免费层准入,也不能单独解释 403。
 - **JSONL 日志**:每请求一行:`reqId, dialect, requestedModel, model, bridge, sessionID, toolCalls, usage, durationMs`。
@@ -134,7 +135,7 @@ Stop-ScheduledTask ccgw-gateway -ErrorAction SilentlyContinue; Start-ScheduledTa
 | 9 | `nemotron-3.5-lightning-free` | 文本 | 速度命名款,但实测反而**最慢**(单请求 13 秒~3 分钟,可超时):别当快模型用;262k 上下文 |
 | 10 | `big-pickle` | 文本 | 经典隐形免费模型;200k 上下文 |
 
-上述图片、视频、PDF、音频能力属于上游模型元数据,尚未通过本桥接接入。请直接使用上游原生客户端处理附件;通过 ccgw 发送附件会得到 400,不能把文本回答当作模型已读取附件。表中的速度为既有观测,不承诺当前延迟。
+表中"输入能力"来自上游目录元数据。本桥接当前已转发**内嵌图片**(PNG/JPEG/WebP/GIF,见「已知限制」);视频、PDF、音频与远程图片网址仍未接入,发来会得到 400。不能把文本回答当作模型已读取附件。表中的速度为既有观测,不承诺当前延迟。
 
 **模型槽位(Claude Code 这类"多个模型槽"的客户端)**:`model-ranks.json` 的 `slots` 把槽位名映射到免费模型——客户端即使发来硬编码名(如 `claude-haiku-4-5-20251001`)也会被路由到对应槽位的模型:
 
@@ -143,7 +144,7 @@ Stop-ScheduledTask ccgw-gateway -ErrorAction SilentlyContinue; Start-ScheduledTa
 | `opus` | 含 `opus` / `fable` | #1 `deepseek-v4.1-flash-free` | 最强档 → 排名第一 |
 | `sonnet` | 含 `sonnet` | #2 `glm-5.3-flash-free` | 日常主力 → 排名第二 |
 | `haiku` | 含 `haiku` | #2 `glm-5.3-flash-free` | 小/快模型 + 后台任务(标题、摘要)→ 实测最快(2–3 秒) |
-| `vision` | 恰为 `vision` / `image` / `vl` | #2 `glm-5.3-flash-free` | 模型名兼容别名;不表示附件转发已实现 |
+| `vision` | 恰为 `vision` / `image` / `vl` | #2 `glm-5.3-flash-free` | 视觉入口别名 → 唯一能读 PDF 的多模态模型(桥接当前转发内嵌图片) |
 
 槽位目标必须是免费模型;指向的模型当前不可用时自动落回排名第一。改排名或槽位都只改 `model-ranks.json`(热生效)。
 
@@ -163,7 +164,7 @@ export API_TIMEOUT_MS=600000                                       # 大模型�
 > Windows 上 `export X="v"` 换成 PowerShell 的 `$env:X="v"`(或 cmd 的 `set X=v`)。这些变量**不设也照样能用**:网关的槽位兜底会把 Claude 硬编码的模型名按上表自动路由;若版本还有 `ANTHROPIC_DEFAULT_FABLE_MODEL` 槽位,fable 默认归入 opus 槽。
 
 - **自动选优**:请求名只要是免费模型就直接用;**槽位名**按上表对齐;**未知 / 付费目录 / 占位名**(如 `claude-sonnet-5-5`、空)落到排名第一——不会再出现"付费名透传 → 免费号必然报错 → 账号误冷却"的连锁;别名 `auto` / `best` / `best-free` / `ccgw-auto` / `free-auto` 等价于"用第一"。
-- `GET /v1/models` 只列原生 provider 的**免费模型**(按排名顺序),每条带 `ccgw_rank`(排名)与 `ccgw_input`(当前桥接输入,仅文本),客户端模型选择器不混入其他 provider 或付费目录。
+- `GET /v1/models` 只列原生 provider 的**免费模型**(按排名顺序),每条带 `ccgw_rank`(排名)与 `ccgw_input`(桥接输入能力,与 `/health.freeRanked` 的 `bridgeInput` 同源),客户端模型选择器不混入其他 provider 或付费目录。
 - `GET /health` 的 `freeRanked` = 当前完整排名(每条含 `rank` / `id` / `name` / `input` / `bridgeInput` / `context`;`input` 保留上游目录能力,`bridgeInput` 表示当前桥接输入),另有 `modelSlots`(槽位映射)/ `defaultModel` / `modelPin`;每次请求日志带 `model` + `modelSource`(`requested` / `slot:<槽位>` / `alias` / `not-free` / `top-free` / `default` / `static`)。
 - 想固定模型:`CCGW_MODEL=glm-5.3-flash-free`(须在免费列表内;它只影响"兜底用哪个",槽位匹配优先);自检:`node test-ranking.mjs`。
 
@@ -185,7 +186,7 @@ export API_TIMEOUT_MS=600000                                       # 大模型�
 - 已在备用出口上仍显示全池限流时,按 `Retry-After` 与持久化冷却等待,不通过反复换节点、重启网关或重试来推断额度恢复;
 - 平时零动作。暂停:`zero-window` 下建 `net-guard.pause`;日志:`zero-window\net-guard.log`(每 ~10 分钟一行 heartbeat,可判断守卫存活);切换时弹系统通知:建文件 `net-guard.toast`(默认关);自启:`setup.ps1` 检测到 NordVPN 时注册 `net-guard.vbs`(计划任务;无管理员权限时退回注册表 Run 键)。WARP / Nord 都没装时 `auto` 不切换(VPN Gate 仍可显式 `-Backend vpngate`,注意上方警示)。
 - **残留自愈**:守卫每轮都检查 `ccgw-vpngate`——当前后端不是 `vpngate` 时,若发现它仍连着,判定为测试/手动残留,自动断开并记日志(`stale egress cleanup`);**`net-guard.pause` 暂停期间同样生效**,机器不会被静默留在公共出口上。
-- **本次部署状态(2026-10-18)**:按用户最后要求“关闭 VPN,保留自切”,当前 WARP 断开,自动切网守卫运行待命,`net-guard.pause` 已备份。保留 `warp-guard.pause`,禁用 `ccgw-warp-login` 的强制开机连接,避免手动关闭后马上重连;手动工具保留。不要把历史成功写成 WARP 已永久恢复服务。
+- **本次部署状态(2026-10-18)**:备用出口 = WARP 且保持连接(`warp-guard` 掉线自动重连,原 `ccgw-warp-login` 已退役以免登录时闪窗);自动切网守卫已注册为计划任务 `ccgw-netguard`(无窗口),按 `zero-window\net-guard.backend`(现为 `warp`)在全池限流时处理出口;回切家宽仍是手动动作(`net-back.ps1`)。历史成功不代表 WARP 永久可用——共享出口仍可能被软限流。
 
 > 历史记录包含 VPN Gate 下 403、其他网络条件下成功等现象;WorkBuddy 的网络 A/B 对照也支持网络条件与结果有关。这些观察不足以确认 IP 黑名单、排除账户因素,或认定四个账户及 ngrok 分享造成拒绝。不能据此承诺独享出口会根治问题或刷新免费额度。
 
@@ -289,7 +290,7 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 | POST | `/v1/chat/completions` | OpenAI Chat Completions(流式、工具) |
 | POST | `/v1/responses` | OpenAI Responses / Codex(流式、函数调用) |
 | GET | `/v1/models` | 免费模型列表,按排名顺序;每条带 `ccgw_rank` 排名与 `ccgw_input` 输入能力(带 `anthropic-version` 头返回 Anthropic 形状,否则 OpenAI 形状) |
-| GET | `/health` | 状态 + 账户池(连接/冷却/登录身份)+ `pool` 全池限流信号 + 模型目录 + `freeRanked` 免费模型排名(每条含 rank/输入能力/上下文)+ `modelSlots` 槽位映射 + `defaultModel` / `modelPin` |
+| GET | `/health` | 状态 + 账户池(连接/冷却/登录身份)+ `pool` 全池限流信号 + 模型目录 + `freeRanked` 免费模型排名(每条含 rank/input/bridgeInput/context)+ `modelSlots` 槽位映射 + `defaultModel` / `modelPin` + `egress`(上游出口:`preferredFamily` / `active` / `connections` / `failures` / `fallbacks` / `lastFamily`) |
 
 ## 环境变量
 
@@ -316,7 +317,8 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 - `node smoke1.mjs` — 引擎冒烟(文本回合 + 工具捕获/中断)。
 - `node test-formats.mjs [anthropic|openai|responses|real]` — 全链路验收:三协议 ×(非流式 / 流式 / 工具往返),外加 `real` 组:模拟客户端**真实读取文件、真实执行命令**(输出含一次性 token,最终回答必须包含它们)。
 - `node test-ranking.mjs` — 免费模型识别 / 排名 / 自动选优自检。
-- `node --test test-errors.mjs test-protocol-regressions.mjs test-cooldowns.mjs test-budget.mjs` — 本地模拟回归:错误分类、输出预算、协议输入、冷却恢复与受管会话插件,不调用真实上游。
+- `node --test test-errors.mjs test-protocol-regressions.mjs test-cooldowns.mjs test-budget.mjs test-images.mjs test-egress.mjs test-cancel.mjs test-plugin-readiness.mjs test-silent-node.mjs test-direct-ipv6.mjs` — 本地模拟回归(共 11 个套件,全部不调用真实上游):错误分类、输出预算、协议输入、冷却恢复、受管会话插件、内嵌图片、IPv6 出口 CONNECT、取消传播、插件就绪、GUI 子系统 node、原生 IPv6 直连。
+- `test-all.cmd` — 一键跑上面全部离线回归 + `test-ranking.mjs`;只看退出码(0 = 全绿)。
 - `node verify-live.mjs` — 对运行中的网关做健康 + 文本 + 工具往返快速验证。
 - `ccgw.log` — 每请求一行 JSON,路由证明 = `sessionID`(可在 OpenCode 桌面版里打开对应会话)。
 
@@ -358,12 +360,12 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 
 - `403 FreeTierError` 表示上游准入拒绝，不能据此认定账户额度耗尽。网关保留 403；不进行同一请求的账户轮换，也不设置 `pool.quotaExhausted`。
 - `401`、`429`、`503` 保留原始状态；流式请求在已经发送的 HTTP 200 内使用协议错误事件。日志增加 `upstreamStatus`、`errorKind`、`errorCode`，不记录认证信息。
-- 自动切换出口只影响网络，不等于修复上游准入。当前 VPN 关闭,按用户要求保留按需自切待命,暂停无条件掉线重连并禁用强制开机连接;账户授权和网关密钥均不随网络状态改变。
+- 自动切换出口只影响网络，不等于修复上游准入。当前备用出口为 WARP，掉线由 `warp-guard` 自动重连,按用户要求保留`ccgw-netguard` 待命,回切家宽仍为手动;账户授权和网关密钥均不随网络状态改变。
 - 离线回归：`node --test test-errors.mjs`；排名回归：`node test-ranking.mjs`。`test-formats.mjs` 是真实上游验收；上游 403 时验收失败，不能把离线通过写成模型服务恢复。
 
 ## 2026-10-18：IPv4 准入拒绝的本机修复
 
-同账户官方客户端对照确认 IPv4 返回 FreeTierError，而 IPv6 正常。现有 8317 增加仅限本机、带认证、仅允许 opencode.ai:443 的透明 CONNECT，四个专用后台进程优先 IPv6；不修改 TLS/客户端身份，不开启 VPN。原账号、会话和工具权限保留。DeepSeek、Claude Messages、Codex Responses、官方桌面服务经 ccgw 及外部工具往返均已真实成功。启动配置已持久保存，凭据只在进程内解密。详见 [修复与验证记录](RATE_LIMIT_RETRY.md)。
+同账户官方客户端对照(2026-10-18 04:20)显示 IPv4 返回 FreeTierError、IPv6 正常;同日 07:33 同一家宽 IPv4 用官方客户端已恢复正常——该拒绝是偶发软限流,不是永久封禁,遇到先重试。现有 8317 增加仅限本机、带认证、仅允许 opencode.ai:443 的透明 CONNECT，四个专用后台进程优先 IPv6；不修改 TLS/客户端身份，不开启 VPN。原账号、会话和工具权限保留。DeepSeek、Claude Messages、Codex Responses、官方桌面服务经 ccgw 及外部工具往返均已真实成功。启动配置已持久保存，凭据只在进程内解密。出口运行状态见 `/health.egress`（`preferredFamily:6`，失败自动回退 IPv4）。详见 [修复与验证记录](RATE_LIMIT_RETRY.md)。
 
 ## License
 

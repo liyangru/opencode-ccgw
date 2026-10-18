@@ -88,24 +88,26 @@ $trg2.Delay = "PT20S"
 Register-ScheduledTask -TaskName "ccgw-gateway" -Action $act2 -Trigger $trg2 -Settings $set `
   -Description "ccgw: gateway on 127.0.0.1:$GatewayPort" -Force | Out-Null
 
-# --- net-guard (optional): auto-switch egress to NordVPN when the whole pool
-# is rate-limited at once. Requires the NordVPN client (logged in); skipped
-# otherwise. Falls back to an HKCU Run entry when task registration is denied.
+# --- net-guard (optional): handle the backup egress when the whole pool is
+# rate-limited at once. The backend comes from zero-window\net-guard.backend
+# (warp / nord / vpngate / none); registered when WARP or NordVPN is present.
+# Falls back to an HKCU Run entry when task registration is denied.
 $nordExe = "C:\Program Files\NordVPN\NordVPN.exe"
-if (Test-Path $nordExe) {
+$warpExe = "C:\Program Files\Cloudflare\Cloudflare WARP\warp-cli.exe"
+if ((Test-Path $nordExe) -or (Test-Path $warpExe)) {
   $ngVbs = Join-Path $zw "net-guard.vbs"
   try {
     $act3 = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "`"$ngVbs`""
     $trg3 = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
     Register-ScheduledTask -TaskName "ccgw-netguard" -Action $act3 -Trigger $trg3 -Settings $set `
-      -Description "ccgw: switch egress to NordVPN when the whole account pool is rate-limited" -Force | Out-Null
+      -Description "ccgw: backup-egress guard (net-guard.backend) when the whole account pool is rate-limited" -Force | Out-Null
   } catch {
     Write-Warning "ccgw-netguard task not registered ($($_.Exception.Message)); using HKCU Run key"
     Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "ccgw-netguard" `
       -Value ('wscript.exe "' + $ngVbs + '"')
   }
 } else {
-  Write-Host "(NordVPN not found - skipping ccgw-netguard auto-switch registration)"
+  Write-Host "(No WARP / NordVPN found - skipping ccgw-netguard registration; see README)"
 }
 
 # --- WARP keepalive (optional): a windowless watchdog that reconnects WARP if it
