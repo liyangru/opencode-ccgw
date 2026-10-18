@@ -88,7 +88,7 @@ Set-Content .\ccgw\zero-window\egress-ssh.target 'ubuntu@<vm-ip>'
 ```powershell
 .\ccgw\zero-window\egress-ssh-wire.ps1 -Action wire -Target ubuntu@<vm-ip>
 # 1 自检桥 → 2 起桥 → 3 改 CCGW_EGRESS_UPSTREAM → 4 重启网关 → 5 真实回合
-# 任何一步失败：恢复接线前的 upstream、重启网关、停桥
+# 任何一步失败：恢复接线前的 upstream、重启网关、停桥，再跑一轮真实回合自证回滚
 
 # 非 22 端口 / 指定私钥
 .\ccgw\zero-window\egress-ssh-wire.ps1 -Action wire -Target ubuntu@<vm-ip> -SshPort 2222 -IdentityFile C:\Users\me\.ssh\oracle
@@ -97,7 +97,7 @@ Set-Content .\ccgw\zero-window\egress-ssh.target 'ubuntu@<vm-ip>'
 .\ccgw\zero-window\egress-ssh-wire.ps1 -Action unwire   # 恢复原 upstream、重启、停桥、再跑一轮验证
 ```
 
-`wire` 的通过条件不是“端口通了”，而是真实回合成功且 `/health.egress.lastFamily === "proxy"`、`connections >= 1`；否则判定为没走桥并回滚。
+`wire` 的通过条件不是“端口通了”，而是真实回合成功且 `/health.egress.lastFamily === "proxy"`、`connections >= 1`；否则判定为没走桥并回滚。回滚后会再跑一轮真实回合，确认输出 `rollback verified: turn ok, egress.lastFamily=proxy`；若回滚后仍失败，打印 `WARN`，不会静默成功。
 
 > **本机 SSH 服务不能替代云主机。** 已用本机 `ssh2` 服务实测：`check` 返回 `200`、SSH 认证与 `direct-tcpip` 全部正常，但真实回合仍被上游 **403**——因为出口 IP 还是本机 IP。`wire` 正确识别失败并回滚到 WARP。独享出口的价值在于**换 IP**，必须用云主机；传输层本身已经验证过。
 
