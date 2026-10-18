@@ -4,7 +4,7 @@
 
 每个请求都作为一次**真实的 OpenCode 会话**执行(日志中可查 `sessionID`),客户端自带的工具(Read/Bash/Edit/...)通过**临时 MCP 桥接**获得**真实工具往返**——与 Claude Code / Codex / Claude Desktop 原生体验一致(含单回合多工具调用)。
 
-适用场景:配合供应商切换器(如 [CC Switch](https://cc-switch.org))把 OpenCode 里已配置的模型——尤其是**免费模型**——接给 Claude Code、Codex、Claude Desktop 等客户端使用。
+适用场景:配合供应商切换器(如 [CC Switch](https://cc-switch.org))把 OpenCode 原生 provider 中的**免费模型**接给 Claude Code、Codex、Claude Desktop 等客户端使用。其他已配置 provider 的模型不会混入此网关目录。
 
 > 灵感来自 [opencode-llm-proxy](https://github.com/KochC/opencode-llm-proxy)(OpenCode 插件形态)。ccgw 采用**独立进程**形态,直接对话 OpenCode V2 HTTP API,因此支持**无头 / 零窗口**运行、可在桌面版关闭时继续服务。
 
@@ -13,13 +13,15 @@
 - **三协议**:Anthropic Messages、OpenAI Chat Completions、OpenAI Responses(含流式与工具)。
 - **真实工具往返**:动态注册 stdio MCP 桥接 → 捕获模型发起的工具调用 → 中断回合 → 把调用按客户端方言返回;工具结果随下一次请求回到模型。支持**并行工具调用**。
 - **真实会话**:每次请求 = 一次真实 OpenCode 会话;空闲会话按 `sessionID` 定时清扫。
+- **请求输出预算**:三种协议的输出 token 上限传入受管会话,由网关专用 `budget-plugin` 的 OpenCode 原生 hook 设置模型调用上限;插件未激活时返回 503,不静默忽略预算。
+- **明确的输入边界**:当前桥接支持文本与工具调用。图片、音频、视频、PDF 等附件尚未转发,请求包含不支持的附件时明确返回 400。
 - **免费模型路由**:不匹配已知免费模型 ID 的模型名自动路由到默认模型(可用 `CCGW_MODEL` 配置)。
 - **零窗口模式**:登录自动启动(两个计划任务),无任何窗口;可完全不开桌面版使用。
 - **多账户账户池**:一账户一隔离实例(独立 profile / 端口 / 计划任务),网关轮询分摊请求,命中限流自动冷却并换户重试(见下文)。
 - **可选自动切出口**:所有已知免费模型在全池均进入限流冷却时,`net-guard` 按已有配置处理备用 VPN;此信号本身不能确定上游按 IP 限流。可通过 `net-guard.pause` 暂停自动切换,一键 `net-back` 回切(见下文)。
-- **备用出口保活**:接上备用出口后,`warp-guard`(计划任务 `ccgw-warp-guard`,登录时 + 每 ~10 分钟)只在 WARP 掉线时自动重连——永远不会主动断开;回切家宽仍是手动动作。
+- **可选备用出口保活**:`warp-guard` 可在启用后检查 WARP 连接;使用 `warp-guard.pause` 暂停。本次部署按用户要求保持 VPN 关闭,不把网络切换视为恢复免费额度的方法。
 - **CC Switch 深链生成**:一条命令生成 Claude Code / Codex 的一键导入链接。
-- **最小权限会话**:`[deny *, allow read, allow <bridge>_*]`——只保留 `read`(免费层要求请求包含 `read` 工具,否则 403)与桥接工具。
+- **最小权限会话**:`[deny *, allow read, allow <bridge>_*]`——只保留 `read` 与桥接工具。该权限配置不代表能通过上游免费层准入,也不能单独解释 403。
 - **JSONL 日志**:每请求一行:`reqId, dialect, requestedModel, model, bridge, sessionID, toolCalls, usage, durationMs`。
 
 ## 架构
@@ -35,7 +37,7 @@ Claude Code / Codex / Claude Desktop / 任意 Anthropic|OpenAI SDK
         ▼
 OpenCode 服务(桌面版后台服务,或无头 opencode-cli serve × N 账户池)
         ▼
-   免费模型 / 任意已配置模型
+   OpenCode 原生 provider 的免费模型
 ```
 
 ## 快速开始
@@ -96,7 +98,7 @@ Stop-ScheduledTask ccgw-gateway -ErrorAction SilentlyContinue; Start-ScheduledTa
 - `GET /health` 的 `accounts` 数组显示每个实例的连接状态、冷却倒计时、最近错误与**登录身份**(`identity` / `credentialId` / `email` / `accountID`;未登录的匿名实例为 `null`);`pool` 里 `distinctAccounts` = 不同邮箱的**账号数**(摊薄看这个),`total` / `loggedIn` / `anonymous` 都是**实例数**;日志每行带 `account` 字段;
 - **识别"是不是新账号"**:登录会写入该账户的隔离 profile,`login-account.ps1` 会把身份(如 `OpenCode Console / Personal`)与 credential id 记入 `accounts.json`;**额度只跟登录的账号绑定——同一账号登进多个实例不会增加总额度**(credential id 每次登录都可能变化,不能单独用它断定是不是同一账号——以 `accountID` / `email` 为准)。`zero-window\accounts-status.ps1` 可查看全部实例(Name / Port / Email / Identity / CredId / 冷却;加 `-Live` 从各隔离 profile 实时重读并刷新;未登录的显示 `(anonymous / not logged in)`);
 - 没有 `accounts.json` 时行为与单账户完全一致(向后兼容);删除该文件即可退回单账户;
-- 限流究竟按账户还是按 IP/设备判定取决于上游:**当前观察证据是"出口 IP 是主开关"**——同一出口 IP 被点名时,池内各实例 25 秒内接连被拒(实测 2026-10;当时本机只有 1 个账号的登录、其余为匿名实例——**不论实例/凭据/是否登录,同一 IP 一律被拒**),换回干净 IP 立即恢复。所以多账户的价值是"干净 IP 上的负载分摊",救不了 IP 级封禁;封禁靠下面的出口切换解决。
+- 多个实例在同一模型上都返回 429,只证实当前该模型的账户池受到限流,不证明上游按 IP、设备或账户中的哪一项统计。403 另按准入或权限拒绝处理,不据此判定额度耗尽。
 - **实例 ≠ 账号**:`pool.total` / `pool.loggedIn` / `pool.anonymous` 分别是"实例数 / 已登录实例数 / 匿名实例数"——一个账号可以登录多个实例,**额度不会叠加**;未登录实例(如某个还没登录的新实例)以匿名身份承接请求,能分担并发但没有独立额度。要真正的多账户摊薄,每个实例必须登录**不同的账号**——看 `pool.distinctAccounts`(按 `email` 去重的账号数)。
 
 ## 免费模型:自动发现 + 排名 + 选优(模型槽位按需填充)
@@ -107,16 +109,19 @@ Stop-ScheduledTask ccgw-gateway -ErrorAction SilentlyContinue; Start-ScheduledTa
 - 优先遵守上游 `Retry-After`；没有提示时使用本地退避（默认 300 秒，连续失败递增，默认上限 1800 秒）。这是网关的重试间隔，不是官方额度重置时间。
 - 所有候选都在冷却时，返回 429 / 503 和 `Retry-After`，不会继续请求冷却中的实例。网络故障的冷却仍适用于该实例的所有模型。
 - 并发请求中，迟到的成功不能清除新产生的冷却，较短的限流提示不能缩短已有截止时间。
+- 冷却截止时间与失败次数保存到 `CCGW_STATE_FILE`（默认仓库目录的 `.ccgw-state.json`）；重启后恢复尚未过期且账户作用域匹配的记录，重启不会清空冷却。状态文件不包含凭据、提示词或上游响应正文，不应复制到其他部署。
+- 网关专用插件通过原生 `retry` hook 关闭受管会话的 OpenCode 重复重试，由网关控制有界重试；普通 OpenCode 会话不受影响。
 - 流式响应在首个非空内容到达后才发送 SSE 头；此前的错误保留真实 HTTP 状态。已经开始输出的请求不会换账户重放。
 - `/health` 的 `pool.limitedModels` 和账户的 `modelCooldowns` 提供分模型状态；只有所有已知免费模型在全池均被限流时才发出全池信号。这不能证明限制按 IP 统计。
+- `/health` 可达、事件流已连接或 `quotaExhausted:false` 均不代表模型调用成功或额度充足；额度与准入须以实际请求结果确认。
 
 回归验证：`node --test test-errors.mjs`（本地 HTTP/SSE 模拟，不消耗上游额度）。
 
-网关自动从账户实例的实时目录里识别**免费模型**——判据取自上游元数据本身(`cost = 0/0`,或名字带 `-free` 后缀;`big-pickle` 这类无后缀的免费模型也能自动认出),按仓库根目录的 `model-ranks.json` 从强到弱排序,新出现的免费模型自动补到列表尾部(无需改代码;该文件热生效,约一分钟内刷新)。
+网关仅从账户实例实时目录的 **`providerID = opencode` 原生 provider** 中识别已启用的免费模型——判据取自上游元数据本身(`cost = 0/0`,或名字带 `-free` 后缀;`big-pickle` 这类无后缀的免费模型也能自动认出)。本次原生免费目录为 10 个模型;其他本地 provider（包括指回网关的 provider）不参与发现与路由。免费列表按仓库根目录的 `model-ranks.json` 从强到弱排序,新出现的免费模型自动补到列表尾部(无需改代码;该文件热生效,约一分钟内刷新)。目录条目和免费标记不保证当前账户能成功调用。
 
-**默认排名(2026-10-17:好 → 差;多模态不落榜——前 5 里有 4 个能看图/视频):**
+**默认排名(2026-10-17:好 → 差;输入列为上游目录能力,当前网关桥接仅转发文本与工具调用):**
 
-| # | 模型 | 输入能力 | 优点 / 适合 |
+| # | 模型 | 上游目录输入能力 | 上游说明 / 既有观测 |
 |---|---|---|---|
 | 1 | `deepseek-v4.1-flash-free` | 文本 + 图片 | 综合首选,编码/代理任务最稳;能看图(截图/OCR);200k 上下文 |
 | 2 | `glm-5.3-flash-free` | 文本 + 图片 + **视频** + **PDF** | 多模态首选:唯一能读 **PDF**;图片/视频理解;200k 上下文;实测**响应最快**(2–3 秒) |
@@ -129,16 +134,16 @@ Stop-ScheduledTask ccgw-gateway -ErrorAction SilentlyContinue; Start-ScheduledTa
 | 9 | `nemotron-3.5-lightning-free` | 文本 | 速度命名款,但实测反而**最慢**(单请求 13 秒~3 分钟,可超时):别当快模型用;262k 上下文 |
 | 10 | `big-pickle` | 文本 | 经典隐形免费模型;200k 上下文 |
 
-按需速查:**看图** → #1/#2/#3/#5/#6/#7 任意;**看视频** → #2(glm)/#6/#7;**读 PDF** → 只有 #2(glm);**听音频** → 只有 #7(mimo);**超长上下文** → #3 起(1M);**要最快** → #2(glm,实测 2–3 秒)。
+上述图片、视频、PDF、音频能力属于上游模型元数据,尚未通过本桥接接入。请直接使用上游原生客户端处理附件;通过 ccgw 发送附件会得到 400,不能把文本回答当作模型已读取附件。表中的速度为既有观测,不承诺当前延迟。
 
 **模型槽位(Claude Code 这类"多个模型槽"的客户端)**:`model-ranks.json` 的 `slots` 把槽位名映射到免费模型——客户端即使发来硬编码名(如 `claude-haiku-4-5-20251001`)也会被路由到对应槽位的模型:
 
 | 槽位 | 请求名匹配 | 当前指向 | 含义 |
 |---|---|---|---|
 | `opus` | 含 `opus` / `fable` | #1 `deepseek-v4.1-flash-free` | 最强档 → 排名第一 |
-| `sonnet` | 含 `sonnet` | #2 `glm-5.3-flash-free` | 日常主力 → 排名第二(顺带多模态:视频/PDF 都能看) |
+| `sonnet` | 含 `sonnet` | #2 `glm-5.3-flash-free` | 日常主力 → 排名第二 |
 | `haiku` | 含 `haiku` | #2 `glm-5.3-flash-free` | 小/快模型 + 后台任务(标题、摘要)→ 实测最快(2–3 秒) |
-| `vision` | 恰为 `vision` / `image` / `vl` | #2 `glm-5.3-flash-free` | 图片/视频/PDF 专用入口 |
+| `vision` | 恰为 `vision` / `image` / `vl` | #2 `glm-5.3-flash-free` | 模型名兼容别名;不表示附件转发已实现 |
 
 槽位目标必须是免费模型;指向的模型当前不可用时自动落回排名第一。改排名或槽位都只改 `model-ranks.json`(热生效)。
 
@@ -149,7 +154,7 @@ export ANTHROPIC_BASE_URL="https://bronco-rewrap-january.ngrok-free.dev"   # 本
 export ANTHROPIC_AUTH_TOKEN="<口令>"                                       # 本机直连可填任意非空值
 export ANTHROPIC_MODEL="deepseek-v4.1-flash-free"                  # 默认会话 → 排名 #1
 export ANTHROPIC_DEFAULT_OPUS_MODEL="deepseek-v4.1-flash-free"     # opus 槽 → 排名 #1(最强)
-export ANTHROPIC_DEFAULT_SONNET_MODEL="glm-5.3-flash-free"         # sonnet 槽 → 排名 #2(多模态主力)
+export ANTHROPIC_DEFAULT_SONNET_MODEL="glm-5.3-flash-free"         # sonnet 槽 → 排名 #2
 export ANTHROPIC_DEFAULT_HAIKU_MODEL="glm-5.3-flash-free"          # haiku 槽 + 后台任务 → 实测最快
 export CLAUDE_CODE_SUBAGENT_MODEL="deepseek-v4.1-flash-free"       # 子代理 → 排名 #1
 export API_TIMEOUT_MS=600000                                       # 大模型首字较慢,放宽超时
@@ -158,31 +163,31 @@ export API_TIMEOUT_MS=600000                                       # 大模型�
 > Windows 上 `export X="v"` 换成 PowerShell 的 `$env:X="v"`(或 cmd 的 `set X=v`)。这些变量**不设也照样能用**:网关的槽位兜底会把 Claude 硬编码的模型名按上表自动路由;若版本还有 `ANTHROPIC_DEFAULT_FABLE_MODEL` 槽位,fable 默认归入 opus 槽。
 
 - **自动选优**:请求名只要是免费模型就直接用;**槽位名**按上表对齐;**未知 / 付费目录 / 占位名**(如 `claude-sonnet-5-5`、空)落到排名第一——不会再出现"付费名透传 → 免费号必然报错 → 账号误冷却"的连锁;别名 `auto` / `best` / `best-free` / `ccgw-auto` / `free-auto` 等价于"用第一"。
-- `GET /v1/models` 只列**免费模型**(按排名顺序),每条带 `ccgw_rank`(排名)与 `ccgw_input`(输入能力),客户端模型选择器里不再混入用不了的付费目录。
-- `GET /health` 的 `freeRanked` = 当前完整排名(每条含 `rank` / `id` / `name` / `input` / `context`),另有 `modelSlots`(槽位映射)/ `defaultModel` / `modelPin`;每次请求日志带 `model` + `modelSource`(`requested` / `slot:<槽位>` / `alias` / `not-free` / `top-free` / `default` / `static`)。
+- `GET /v1/models` 只列原生 provider 的**免费模型**(按排名顺序),每条带 `ccgw_rank`(排名)与 `ccgw_input`(当前桥接输入,仅文本),客户端模型选择器不混入其他 provider 或付费目录。
+- `GET /health` 的 `freeRanked` = 当前完整排名(每条含 `rank` / `id` / `name` / `input` / `bridgeInput` / `context`;`input` 保留上游目录能力,`bridgeInput` 表示当前桥接输入),另有 `modelSlots`(槽位映射)/ `defaultModel` / `modelPin`;每次请求日志带 `model` + `modelSource`(`requested` / `slot:<槽位>` / `alias` / `not-free` / `top-free` / `default` / `static`)。
 - 想固定模型:`CCGW_MODEL=glm-5.3-flash-free`(须在免费列表内;它只影响"兜底用哪个",槽位匹配优先);自检:`node test-ranking.mjs`。
 
-## 全池限流 → 自动切换出口(备用 VPN:WARP / Nord / VPN Gate)
+## 可选网络守卫与手动备用出口
 
-若免费层限额按 IP 判定,加账户救不回;**所有实例同时因限流冷却**就是这个信号。ccgw 把它暴露为 `/health` 的 `pool` 对象(`total`=实例数、`loggedIn`=已登录实例数、`anonymous`=匿名实例数、`distinctAccounts`=不同账号数、`cooling`、`quotaExhausted`),`zero-window\net-guard.ps1` 常驻监听并自动切换备用出口。
+`/health` 的 `pool` 对象提供实例、身份与冷却计数。`limitedModels` 表示在所有账户均有本地限流记录的模型;只有全部已知免费模型都符合这一条件,`quotaExhausted` 才为 true。这些状态不证明 IP 限流策略。已有 `zero-window\net-guard.ps1` 可监听此信号并按本机配置处理备用出口,但连接成功后仍须实际调用确认,不能承诺解除 403 或恢复额度。
 
-**出口后端**(`net-guard.ps1 -Backend` 参数,或一行文件 `zero-window\net-guard.backend` 写 `warp` / `nord` / `vpngate` / `none`;默认 `auto`:装了并注册过 WARP 用 WARP(免费免登录),否则装了 NordVPN 用 Nord,**都没有则不自动切换**——公共 VPN(VPN Gate)出口已被免费层按 IP 拉黑,自动切过去只会把"限流"升级成 403):
+**出口后端**(`net-guard.ps1 -Backend` 参数,或本机文件 `zero-window\net-guard.backend` 写 `warp` / `nord` / `vpngate` / `none`;`auto` 根据已有安装选择 WARP 或 Nord,都没有则不自动切换):
 
 | 后端 | 账号 / 安装 | 说明 |
 |---|---|---|
-| `warp` | **零账号、零登录**(匿名设备注册) | [Cloudflare WARP](https://1.1.1.1/):`winget install Cloudflare.Warp` + `warp-cli --accept-tos registration new`;✅ 实测免费层放行(2026-10-17,经网关真请求正常返回;共享出口 IP 偶发软限流,交给账户池消化;见 `egress-warp.ps1`) |
+| `warp` | **零账号、零登录**(匿名设备注册) | [Cloudflare WARP](https://1.1.1.1/);2026-10-17 曾记录经网关调用成功,属于当时的网络观测,不保证后续可用或额度变化 |
 | `nord` | 需已登录的 NordVPN | 官方 CLI 通道,零窗口秒级(见 `nord-cli.ps1`) |
-| `vpngate` | **零账号、零安装** | [VPN Gate](https://www.vpngate.net/)(筑波大学公共 VPN):Windows 原生 L2TP/IPsec,凭据公开(vpn/vpn),无需管理员;⚠ 实测共享出口已被上游按 IP 标记,仅建议作普通 VPN 手动使用 |
+| `vpngate` | **零账号、零安装** | [VPN Gate](https://www.vpngate.net/)(筑波大学公共 VPN);历史测试中出现过 403,原因未被上游确认,保留为手动网络工具 |
 | `none` | 无 | 只监听并写日志提示(WARP / Nord 都没装时 `auto` 的默认值) |
 
-- `quotaExhausted:true` 且备用出口未连接 → 自动连接并等隧道就绪 → 客户端重试即可继续;
+- 启用守卫时,`quotaExhausted:true` 可触发既有备用出口逻辑;守卫改变的是网络连接,实际请求仍可能失败;
 - **全程静默**:Nord 走官方 CLI(仅当应用进程被完全退出时回退 UIA 冷启动);WARP 走 `warp-cli`;VPN Gate 走系统拨号——都不创建窗口、不弹前台;守卫进程本身也无窗口(net-guard.vbs 启动);
-- 已在备用出口上仍显示全池限流(**超过约 6 分钟冷却排水期**)→ 日志提醒"该出口可能也被限"(不自动换节点/换服务器,避免频繁换 IP);
+- 已在备用出口上仍显示全池限流时,按 `Retry-After` 与持久化冷却等待,不通过反复换节点、重启网关或重试来推断额度恢复;
 - 平时零动作。暂停:`zero-window` 下建 `net-guard.pause`;日志:`zero-window\net-guard.log`(每 ~10 分钟一行 heartbeat,可判断守卫存活);切换时弹系统通知:建文件 `net-guard.toast`(默认关);自启:`setup.ps1` 检测到 NordVPN 时注册 `net-guard.vbs`(计划任务;无管理员权限时退回注册表 Run 键)。WARP / Nord 都没装时 `auto` 不切换(VPN Gate 仍可显式 `-Backend vpngate`,注意上方警示)。
 - **残留自愈**:守卫每轮都检查 `ccgw-vpngate`——当前后端不是 `vpngate` 时,若发现它仍连着,判定为测试/手动残留,自动断开并记日志(`stale egress cleanup`);**`net-guard.pause` 暂停期间同样生效**,机器不会被静默留在公共出口上。
-- **备用出口保活(2026-10-18)**:连上备用出口后由 `zero-window\warp-guard.ps1`(+ 计划任务 `ccgw-warp-guard`,登录时与每 ~10 分钟)看护——WARP 掉线就重连,已连接则什么都不做;日志 `zero-window\warp-guard.log`,暂停建 `warp-guard.pause`。它补的是 `ccgw-warp-login`(只在登录后连一次)的空档:睡眠唤醒 / WARP 服务重启 / 误断之后都能自动补连。它**只连不断**,回切家宽依旧手动。
+- **本次部署状态(2026-10-18)**:按用户最后要求“关闭 VPN,保留自切”,当前 WARP 断开,自动切网守卫运行待命,`net-guard.pause` 已备份。保留 `warp-guard.pause`,禁用 `ccgw-warp-login` 的强制开机连接,避免手动关闭后马上重连;手动工具保留。不要把历史成功写成 WARP 已永久恢复服务。
 
-> ⚠️ 实测警示(2026-10):**公共 VPN 的共享出口对"刷新免费额度"基本无效**——VPN Gate 的中继 IP 被全球用户共用,免费层很可能早已按其限流(实测连上后第一个请求即被拒:"free tier can only be used from within OpenCode",池内实例全部被连坐——当时本机只有 1 个账号、其余为匿名实例,证明按 IP 判定、与账户无关;换回干净出口立即恢复)。后续复测(2026-10-17):经 VPN Gate 出口时**即使重新登录授权,免费层请求仍全部 403,断开 VPN 立即恢复**——该拦截按出口 IP 判定,与账户/授权无关。想用出口切换刷新配额,需要**独享 IP**(自己的 Nord 账号,或自建 WireGuard 出口);VPN Gate 后端的定位是"零门槛的免费出口",适合普通 VPN 用途。
+> 历史记录包含 VPN Gate 下 403、其他网络条件下成功等现象;WorkBuddy 的网络 A/B 对照也支持网络条件与结果有关。这些观察不足以确认 IP 黑名单、排除账户因素,或认定四个账户及 ngrok 分享造成拒绝。不能据此承诺独享出口会根治问题或刷新免费额度。
 
 配套命令(均在 `zero-window\`):
 
@@ -194,7 +199,7 @@ export API_TIMEOUT_MS=600000                                       # 大模型�
 .\ip-check.ps1 [-Probe] [-Rebase]                     # 出口 IP 体检(对比基线 / 经网关真请求)
 ```
 
-设计取舍:**固定使用同一个备用出口**作为应急通道,回切保持手动(`net-back.ps1` 带防呆);不做节点自动轮换,避免频繁换 IP 招风控。
+设计取舍:网络工具与模型调用验证分开,保留手动控制;不自动轮换节点。网络连通只能证明连通,不能证明模型准入或额度恢复。
 
 ## 与 CC Switch 配合
 
@@ -247,13 +252,13 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 
 ### 共享给朋友(零客户端安装 + 免费公网地址)
 
-网关可同时给多台设备/朋友使用,他们不需要安装任何东西——在任意支持自定义 API 地址的工具(或纯 curl / SDK)里填 **地址 + 口令** 即可。账户轮换、全池限流自动切出口(WARP)等机制对所有请求一视同仁。
+网关可同时给多台设备/朋友使用,他们不需要安装任何东西——在任意支持自定义 API 地址的工具(或纯 curl / SDK)里填 **地址 + 口令** 即可。所有请求使用同一账户池和有界重试规则,分享不增加免费额度。
 
 - 公网入口 = 两条免费隧道并存(都转发本地 `http://127.0.0.1:8317`,同一口令):
 
   | 隧道 | 地址 | 说明 |
   |---|---|---|
-  | **ngrok 固定域名**(推荐发给朋友) | **`https://bronco-rewrap-january.ngrok-free.dev`** | 永久不变;计划任务 `ccgw-tunnel-ngrok`(随登录自启);免费额度 2 万请求/月、1 GB 流量/月 |
+  | **ngrok 固定域名**(推荐发给朋友) | **`https://bronco-rewrap-january.ngrok-free.dev`** | 永久不变;计划任务 `ccgw-tunnel-ngrok`(**现默认关闭**——公网转发会把所有外部请求的指纹记到本机出口;分享时才开:`Enable-ScheduledTask ccgw-tunnel-ngrok` 后 `Start-ScheduledTask ccgw-tunnel-ngrok`);免费额度 2 万请求/月、1 GB 流量/月 |
   | cloudflared 快速隧道(备用) | `zero-window\tunnel.log` 里的 `https://<随机名>.trycloudflare.com` | 免账号但重启后会换址;计划任务 `ccgw-tunnel` |
 
   ngrok 固定域名的等价命令(运行器是 `zero-window\tunnel-ngrok.vbs`,机器本地生成、不入库):
@@ -273,7 +278,7 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
   ```
 
   OpenAI 风格把路径换成 `/v1/chat/completions`(或 `/v1/responses`);认证支持 `x-api-key: <token>`、`Authorization: Bearer <token>`、Basic `opencode:<token>`。
-- 额度共享:所有人吃同一个免费账户池;单账户限流自动绕开,全池限流时守卫自动切出口(WARP);任意模型名自动解析——`haiku` / `sonnet` / `opus` 等槽位名按槽位表对齐,其余(含付费名/占位名)落排名第一——见「免费模型:自动发现 + 排名 + 选优(模型槽位按需填充)」;建议朋友照着该章节把 Claude Code 各模型槽位填好。
+- 额度共享:所有人使用同一个免费账户池;429 按账户与模型冷却,没有就绪候选时返回等待时间。任意模型名自动解析——`haiku` / `sonnet` / `opus` 等槽位名按槽位表对齐,其余(含付费名/占位名)落排名第一——见「免费模型:自动发现 + 排名 + 选优(模型槽位按需填充)」;建议朋友照着该章节把 Claude Code 各模型槽位填好。
 
 ## 端点
 
@@ -304,12 +309,14 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 | `CCGW_ACCOUNTS_FILE` | 空 | 账户池配置(accounts.json);文件存在时启用多账户轮询 | 
 | `CCGW_COOLDOWN_SECONDS` | `300` | 命中限流后该账户的冷却时长(秒) |
 | `CCGW_DOWN_COOLDOWN_SECONDS` | `30` | 账户实例失联后的冷却时长(秒) |
+| `CCGW_STATE_FILE` | `.ccgw-state.json`（网关目录） | 持久化本地冷却截止时间与失败次数;重启后恢复,请勿作为源码同步 |
 
 ## 验证与日志
 
 - `node smoke1.mjs` — 引擎冒烟(文本回合 + 工具捕获/中断)。
 - `node test-formats.mjs [anthropic|openai|responses|real]` — 全链路验收:三协议 ×(非流式 / 流式 / 工具往返),外加 `real` 组:模拟客户端**真实读取文件、真实执行命令**(输出含一次性 token,最终回答必须包含它们)。
 - `node test-ranking.mjs` — 免费模型识别 / 排名 / 自动选优自检。
+- `node --test test-errors.mjs test-protocol-regressions.mjs test-cooldowns.mjs test-budget.mjs` — 本地模拟回归:错误分类、输出预算、协议输入、冷却恢复与受管会话插件,不调用真实上游。
 - `node verify-live.mjs` — 对运行中的网关做健康 + 文本 + 工具往返快速验证。
 - `ccgw.log` — 每请求一行 JSON,路由证明 = `sessionID`(可在 OpenCode 桌面版里打开对应会话)。
 
@@ -317,7 +324,7 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 
 1. 解析客户端请求 → 规范化(canonical)消息 + 工具定义;模型名解析:免费模型直用,未知 / 付费 / `auto` → 排名第一的免费模型。
 2. 若有工具:生成唯一桥接名 `gw<随机>` 与清单文件,`PUT /api/experimental/mcp/<name>` 注册 stdio MCP 桥接(`codemode:false`,工具直接暴露);等待其 `connected` 且位置工具目录完成重建(`command.updated` 事件)——这是"工具找不到"问题的根因修复。
-3. 创建一次性 OpenCode 会话:权限 `[deny *, allow read, allow <bridge>_*]`。
+3. 确认 scratch location 的网关预算插件已激活,创建带 `metadata.ccgw.managed` 的一次性 OpenCode 会话:权限 `[deny *, allow read, allow <bridge>_*]`。请求的输出预算写入会话元数据,原生 `context` hook 将 `event.options.maxTokens` 限制为请求预算与既有上限的较小值;原生 `retry` hook 仅对该受管会话关闭重复重试。
 4. 把系统提示 + 历史(含既往工具调用/结果,工具名改写为当前桥接名)渲染为单个提示,`POST /api/session/<id>/prompt`。
 5. 订阅 `/api/event`:文本增量实时转发;捕获 `tool.input.started/ended` + `tool.called`(按 `id` 关联工具名);模型流完该步后宽限 350ms 再 `POST /interrupt`,把工具调用按客户端方言回给客户端。桥接进程对 `tools/call` 永远挂起,直到回合被中断。
 6. 客户端执行工具 → 结果在下次请求的历史中回到模型(新会话、重新注册桥接)。
@@ -327,8 +334,9 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 
 - 依赖 OpenCode 的 `/api/experimental/*` 内部 API;OpenCode 大版本升级后接口可能变化,需跟进适配(已在 V2.0.30 桌面版与 `opencode-cli` v2.0.30 实测)。
 - 推理内容可能混入文本;工具回合的 usage 常为 0。
-- 免费层有速率限制,偶发 429/403 属正常。
-- 最大输出 token 等采样控制由上游决定;网关按客户端兼容接受参数。
+- 免费层有速率限制与准入检查。429 表示限流;403 是准入或权限拒绝,需保留错误并处理原因,不能当作额度耗尽或成功调用。
+- 输出预算接受 Anthropic `max_tokens`、Chat Completions `max_completion_tokens`（优先）/ `max_tokens`、Responses `max_output_tokens`,须为正安全整数,否则返回 400。预算由 `budget-plugin/index.mjs` 通过每个受管会话的原生 hook 执行,未提供预算时沿用上游默认;其余采样参数不代表已完整透传。
+- 内嵌 PNG/JPEG/WebP/GIF 图片已通过原生 prompt files 转发；三协议实测识图通过。远程图片网址、本地文件路径、音频、视频与文档仍明确返回 400，不静默丢弃。
 
 ## 故障排查
 
@@ -336,11 +344,12 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 |---|---|
 | `/health` 显示 `eventStream:false` | OpenCode 服务未运行或刚重启;网关每秒自动重连,持续异常运行 `zero-window\start.cmd`(零窗口模式) |
 | 工具调用失败/模型说工具不存在 | 多为桥接目录重建竞态;网关已等待 `command.updated`。若仍出现,查看日志中 `putBridge` 行 |
-| 免费层 403 (fingerprint) | 不要 deny `read`;会话权限必须保留 `allow read` |
-| 免费层 403 "can only be used from within OpenCode"(已登录也报) | 出口 IP 被上游标记(常见诱因:公共 VPN 出口);断开该 VPN / 回切家宽即恢复(`zero-window\net-back.ps1`;守卫也会自动清理残留的 `ccgw-vpngate` 连接)。与账户和授权无关 |
-| **家宽 IP 本身被标记**(2026-10-18 实测) | 症状:WARP 断开、走家宽时,连**桌面版 OpenCode 自己**都报同一句 403;重连 WARP 后同一账号立即恢复 → 判定按 IP、与账户无关。本机家宽(曼谷 AIS)已被标记。**处置(应急)**:`zero-window\net-guard.backend` 写 `warp`,并让两个计划任务在跑——`ccgw-warp-guard`(每 10 分钟检查,掉线自动重连、永不主动断开)与 `ccgw-warp-login`(登录后 25 秒连一次)。**这只是止血**:WARP 是共享出口,可能偶发软限流,指纹迟早也会被刷出来;根治要独享出口(见上「出口后端」),并减少共享指纹(公网转发按需开、账户池按需扩) |
+| 503 `gateway_plugin_unavailable` | 网关专用插件未激活,不能保证预算和重试策略。检查 scratch location 下 `.opencode/plugins/ccgw-budget/index.mjs` 与 OpenCode 插件加载错误,重新加载该 location 后发起一条带输出预算的文本请求确认 |
+| 请求附件返回 400 | 图片请直接上传为内嵌 PNG/JPEG/WebP/GIF；其他附件与远程图片网址仍未支持，不能删掉附件后宣称已完成分析 |
+| 免费层 403 / "can only be used from within OpenCode" | 保留 403,不按额度耗尽处理,不轮换账户或模型。记录官方客户端版本、登录身份与 UTC 时间,在同一网络、同一模型下对照官方客户端和网关各一次;保留脱敏错误。仍失败时通过 [OpenCode 官方支持入口](https://opencode.ai/v2/docs/console/models/) 联系 `help@anoma.ly`,提供上述对照和错误码,不要发送令牌或密码。修复标准是新的真实文本调用成功,并非连接恢复 |
+| 403 在不同网络条件下结果不同 | 记录网络与客户端、身份、模型等对照条件,只能得出相关性;不能据此确认 IP 封禁、四账户或 ngrok 的原因。保持用户指定的网络状态,避免连续重试 |
 | 池里 3 个实例,但只登录了 1 个账号 | 正常:`total` 是实例数不是账号数;`accounts-status.ps1 -Live` 看每个实例的真实身份,未登录显示 `(anonymous / not logged in)`;`/health` 的 `pool.loggedIn` / `pool.anonymous` 是计数;同一账号登多个实例额度不叠加 |
-| 频繁 429 / 额度打满 | 加账户分摊:`zero-window\add-account.ps1 -Name acct2` → `login-account.ps1 -Name acct2` → 重启网关;`/health` 里看 `accounts` |
+| 频繁 429 / 当前模型全池限流 | 遵守 `Retry-After`,由网关统一执行一层本地退避;查看 `limitedModels` / `modelCooldowns`,可由用户主动选择其他未受限的免费模型。不要无条件加账户、重启清状态或不断重试;冷却结束后用一次实际调用确认 |
 | 全池限流但出口没自动切 | 查 `zero-window\net-guard.log`(每 ~10 分钟应有 heartbeat,没有说明守卫没在跑);确认没有 `net-guard.pause`、`/health` 里有 `pool` 字段;后端:装了 Nord 需已登录;没装 Nord 时 `auto` 默认不切换(需要免费出口就显式 `-Backend vpngate`,注意上方警示) |
 | 修改配置后不生效 | 重启网关进程;客户端会话也要重开 |
 | 想看执行细节 | 置 `CCGW_KEEP_SESSIONS=1` 后用 OpenCode 桌面版打开对应 `sessionID` |
@@ -349,9 +358,19 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 
 - `403 FreeTierError` 表示上游准入拒绝，不能据此认定账户额度耗尽。网关保留 403；不进行同一请求的账户轮换，也不设置 `pool.quotaExhausted`。
 - `401`、`429`、`503` 保留原始状态；流式请求在已经发送的 HTTP 200 内使用协议错误事件。日志增加 `upstreamStatus`、`errorKind`、`errorCode`，不记录认证信息。
-- 自动切换出口只影响网络，不等于修复上游准入。需要保持全机网络稳定时，在私有配置 `zero-window/net-guard.backend` 写入 `none`，并重启守卫。账户授权和网关密钥均不随此设置改变。
+- 自动切换出口只影响网络，不等于修复上游准入。当前 VPN 关闭,按用户要求保留按需自切待命,暂停无条件掉线重连并禁用强制开机连接;账户授权和网关密钥均不随网络状态改变。
 - 离线回归：`node --test test-errors.mjs`；排名回归：`node test-ranking.mjs`。`test-formats.mjs` 是真实上游验收；上游 403 时验收失败，不能把离线通过写成模型服务恢复。
+
+## 2026-10-18：IPv4 准入拒绝的本机修复
+
+同账户官方客户端对照确认 IPv4 返回 FreeTierError，而 IPv6 正常。现有 8317 增加仅限本机、带认证、仅允许 opencode.ai:443 的透明 CONNECT，四个专用后台进程优先 IPv6；不修改 TLS/客户端身份，不开启 VPN。原账号、会话和工具权限保留。DeepSeek、Claude Messages、Codex Responses、官方桌面服务经 ccgw 及外部工具往返均已真实成功。启动配置已持久保存，凭据只在进程内解密。详见 [修复与验证记录](RATE_LIMIT_RETRY.md)。
 
 ## License
 
 MIT © 2026 liyangru
+
+## 2026-10-18：工具黑框与图片转发
+
+原生 MCP 工具每次注册使用控制台版 node.exe，Windows 子进程可能分配控制台窗口。改为专用本机 GUI 子系统 Node 副本运行 stdio 桥接，不修改系统 Node 或官方 OpenCode 文件，保留 stdin/stdout 和工具权限。可执行文件存于 LocalAppData/ccgw/runtime，按原 Node 内容哈希分版本。无控制台子系统与 stdio 测试通过，正式工具 probe_sum(20,22) 往返仍返回 42。其他应用（包括 WorkBuddy）启动的命令窗口不属于此次改动。
+
+image_url 报错源于旧协议适配器主动拒绝图片。新增三协议内嵌图片提取，字节作为原生 files 发送；历史文本保留附件名标记，支持工具图片结果。不抓取任意远程网址或本地路径；上限 20 张、解码字节合计 15MB，入口请求体限制仍适用。图片由官方后台实际解码。hub → ccgw → GLM 在 Chat、Claude Messages 和 Codex Responses 三种请求中均准确读出测试图 Q7M42（字符只在图片中，不在提示词中）。

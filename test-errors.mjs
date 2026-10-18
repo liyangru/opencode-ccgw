@@ -31,7 +31,9 @@ async function fixture(error, run, options = {}) {
       subscribers.set(account, res)
       req.on("close", () => subscribers.delete(account))
     } else if (route === "/api/model") {
-      json({ data: (options.models || ["deepseek-v4.1-flash-free"]).map((id) => ({ id, providerID: "opencode", enabled: true, cost: [{ input: 0, output: 0 }] })) })
+      json({ data: (options.models || ["deepseek-v4.1-flash-free"]).map((id) => ({ id, providerID: "opencode", enabled: true, cost: [{ input: 0, output: 0 }] })).concat(options.extraModels || []) })
+    } else if (route === "/api/plugin") {
+      json({ data: [{ id: 'ccgw-output-budget-v1', state: { status: 'active' } }] })
     } else if (req.method === "POST" && route === "/api/session") {
       const chunks = []
       for await (const chunk of req) chunks.push(chunk)
@@ -72,6 +74,7 @@ async function fixture(error, run, options = {}) {
     env: { ...process.env, CCGW_PORT: String(gatewayPort), CCGW_ACCOUNTS_FILE: accountsFile,
       CCGW_SCRATCH: path.join(dir, "scratch"), CCGW_LOG: path.join(dir, "gateway.log"),
       CCGW_KEEP_SESSIONS: "1", CCGW_TOKEN: "fixture-only", CCGW_TURN_TIMEOUT: "3000",
+      CCGW_STATE_FILE: path.join(dir,'cooldowns.json'),
       ...(options.cooldown !== undefined ? { CCGW_COOLDOWN_SECONDS: String(options.cooldown) } : {}) },
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
@@ -107,6 +110,23 @@ async function fixture(error, run, options = {}) {
 }
 
 const body = { model: "deepseek-v4.1-flash-free", messages: [{ role: "user", content: "diagnostic" }] }
+
+test('only native OpenCode models enter the gateway catalog and free pool', async () => {
+  await fixture(null, async f => {
+    const h = await f.health()
+    assert.deepEqual(h.models,['deepseek-v4.1-flash-free'])
+    assert.deepEqual(h.freeRanked.map(x=>x.id),['deepseek-v4.1-flash-free'])
+  }, {extraModels:[{id:'other-free',providerID:'ccgw',enabled:true,cost:[{input:0,output:0}]}]})
+})
+
+test('invalid budgets fail as 400 while the server stays alive', async () => {
+  await fixture(null, async f => {
+    const r = await f.post('/v1/chat/completions',{...body,max_tokens:0})
+    assert.equal(r.status,400)
+    assert.equal(f.turns(),0)
+    assert.ok(await f.health())
+  })
+})
 
 test("free-tier 403 stays forbidden without account rotation or quota signal", async () => {
   await fixture({ type: "provider.auth", status: 403, message: denied, response: { body: JSON.stringify({ error: { type: "FreeTierError", message: denied } }) } }, async (f) => {

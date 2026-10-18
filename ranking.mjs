@@ -119,7 +119,7 @@ export function describeRanked(models, ranked) {
   const byId = new Map(models.map((m) => [m.id, m]))
   return ranked.map((id, i) => {
     const m = byId.get(id) || {}
-    return { rank: i + 1, id, name: m.name || id, input: m.input || null, context: m.context || null }
+    return { rank: i + 1, id, name: m.name || id, input: m.input || null, bridgeInput: m.input?.includes('image') ? ['text','image'] : ['text'], context: m.context || null }
   })
 }
 

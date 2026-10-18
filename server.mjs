@@ -26,6 +26,7 @@ import crypto from "node:crypto"
 import { fileURLToPath } from "node:url"
 import {
   OpenCode,
+  installGatewayPlugin,
   discoverService,
   runTurn,
   putBridge,
@@ -54,6 +55,8 @@ import {
 } from "./formats.mjs"
 import { describeRanked, isFreeModel, loadRankConfig, pickModel, rankFree } from "./ranking.mjs"
 import { classifyError } from "./errors.mjs"
+import { loadCooldowns, saveCooldowns } from './cooldowns.mjs'
+import {attachEgress,readEgressKey} from './egress.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -67,8 +70,11 @@ const TOKEN = process.env.CCGW_TOKEN || ""
 const MAX_CONCURRENCY = Number(process.env.CCGW_MAX_CONCURRENCY || 3)
 const TURN_TIMEOUT = Number(process.env.CCGW_TURN_TIMEOUT || 180000)
 const KEEP_SESSIONS = process.env.CCGW_KEEP_SESSIONS === "1"
+const STATE_FILE = process.env.CCGW_STATE_FILE || path.join(__dirname,'.ccgw-state.json')
+let egress = null
 
 fs.mkdirSync(SCRATCH, { recursive: true })
+installGatewayPlugin(SCRATCH)
 
 // ---------------------------------------------------------------------------
 // Account pool + live model list
@@ -127,6 +133,11 @@ const accounts = poolCfg.list.map((a) => ({
   lastLimited: false,
   modelCache: { at: 0, ids: [], list: [] },
 }))
+loadCooldowns(STATE_FILE, accounts)
+function persistCooldowns() {
+  try { saveCooldowns(STATE_FILE,accounts) }
+  catch { console.error('[ccgw] 无法保存限流冷却状态，请检查运行目录的写入权限') }
+}
 for (const a of accounts) {
   console.log("[ccgw] account " + a.name + (a.email ? " <" + a.email + ">" : "") + " -> " + a.client.baseUrl + " " + (a.password ? "(auth ok)" : "(no password)"))
   a.client.startEventStream((e) => console.log("[ccgw] " + a.name + ": event stream error:", e.message))
@@ -184,7 +195,9 @@ async function accountModels(a) {
   if (Date.now() - a.modelCache.at < 60000 && a.modelCache.ids.length) return a.modelCache
   try {
     const r = await a.client.req("GET", "/api/model?location[directory]=" + encodeURIComponent(SCRATCH))
-    const data = r.json?.data || []
+    // This bridge runs the native OpenCode provider. Other locally configured
+    // providers (including ccgw itself) are not part of that upstream catalog.
+    const data = (r.json?.data || []).filter((m) => m.providerID === 'opencode')
     a.modelCache = {
       at: Date.now(),
       ids: data.map((m) => m.id),
@@ -258,6 +271,7 @@ function coolDown(a, reason, seconds, model, retryAfterSeconds) {
   console.log("[ccgw] cooldown " + a.name + " for " + secs + "s: " + reason)
   logLine({ phase: "cooldown", account: a.name, model: model || null, seconds: secs, source: retryAfterSeconds ? "provider-retry-after" : "local-backoff", msg: reason })
   notePoolState()
+  persistCooldowns()
 }
 
 function markOk(a, model, started) {
@@ -272,6 +286,7 @@ function markOk(a, model, started) {
     a.lastLimited = false
   }
   notePoolState()
+  persistCooldowns()
 }
 
 // A 429 is scoped conservatively to the requested account/model pair.
@@ -394,6 +409,12 @@ function authed(req) {
 async function handleTurn({ dialect, body, req, res }) {
   const reqId = crypto.randomBytes(6).toString("hex")
   const t0 = Date.now()
+  const ac = new AbortController()
+  const onClose = () => {
+    if (!res.writableFinished) ac.abort()
+  }
+  res.once('close', onClose)
+  if (req.aborted || res.destroyed) { ac.abort(); return }
 
   // Temp cleaners may delete the scratch dir while the gateway runs; recreate
   // it so model listing, bridge registration and session creation keep working.
@@ -403,11 +424,15 @@ async function handleTurn({ dialect, body, req, res }) {
   applyToolChoice(canon, body.tool_choice)
 
   const models = await knownModels()
+  if (ac.signal.aborted || res.destroyed) return
   const rankCfg = loadRankConfig()
   const ranked = rankFree(models.list, rankCfg.order)
   const freeSet = new Set(models.list.filter((m) => m.free).map((m) => m.id))
   const pick = pickModel({ requested: canon.model, ids: new Set(models.ids), freeSet, ranked, slots: rankCfg.slots, pin: PIN, fallback: FALLBACK_MODEL })
   const model = pick.model
+  if(canon.files?.length && !models.list.find(m=>m.id===model)?.input?.includes('image')) {
+    return json(res,400,{error:{type:'invalid_request_error',message:'所选模型不支持图片，请选择支持图片的模型，如 GLM 或 DeepSeek。'}})
+  }
   const inputTokens = countTokensApprox(canon)
 
   let bridgeName = null
@@ -451,12 +476,6 @@ async function handleTurn({ dialect, body, req, res }) {
           : makeResponsesStream(send, canon.model || model, inputTokens)
   }
 
-  const ac = new AbortController()
-  const onClose = () => {
-    if (!res.writableFinished) ac.abort()
-  }
-  res.on("close", onClose)
-
   let sid = null
   let result = null
   let error = null
@@ -488,6 +507,8 @@ async function handleTurn({ dialect, body, req, res }) {
             dir: SCRATCH,
             model: { providerID: "opencode", id: model },
             promptText,
+            maxOutputTokens: canon.maxOutputTokens,
+            files: canon.files,
             bridgeName,
             sanToOrig: nameMap?.sanToOrig,
             onTextDelta: (d) => {
@@ -512,6 +533,7 @@ async function handleTurn({ dialect, body, req, res }) {
           }
         }
 
+        if (r?.sessionID) sid = r.sessionID
         const failMsg = e ? String(e.message || e) : r?.error ? String(r.error.message || r.error) : null
         if (!failMsg) {
           result = r
@@ -637,6 +659,7 @@ const server = http.createServer(async (req, res) => {
           lastError: a.lastError,
         })),
         pool: poolState(),
+        egress: egress?.state() || null,
       })
     }
 
@@ -660,7 +683,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "POST" && (p === "/v1/messages" || p === "/v1/messages/beta")) {
       const body = JSON.parse(await readBody(req))
-      return handleTurn({ dialect: "anthropic", body, req, res })
+      return await handleTurn({ dialect: "anthropic", body, req, res })
     }
 
     if (req.method === "POST" && p === "/v1/messages/count_tokens") {
@@ -672,12 +695,12 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "POST" && p === "/v1/chat/completions") {
       const body = JSON.parse(await readBody(req))
-      return handleTurn({ dialect: "openai", body, req, res })
+      return await handleTurn({ dialect: "openai", body, req, res })
     }
 
     if (req.method === "POST" && p === "/v1/responses") {
       const body = JSON.parse(await readBody(req))
-      return handleTurn({ dialect: "responses", body, req, res })
+      return await handleTurn({ dialect: "responses", body, req, res })
     }
 
     json(res, 404, { error: { message: "not found: " + req.method + " " + p } })
@@ -686,6 +709,8 @@ const server = http.createServer(async (req, res) => {
     else res.end()
   }
 })
+
+if(process.env.CCGW_EGRESS_FAMILY)egress=attachEgress(server,{key:readEgressKey(process.env.CCGW_EGRESS_KEY_DIR),family:Number(process.env.CCGW_EGRESS_FAMILY)})
 
 server.listen(PORT, HOST, () => {
   console.log("[ccgw] listening on http://" + HOST + ":" + PORT)

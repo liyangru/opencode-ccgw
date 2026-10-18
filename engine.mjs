@@ -13,9 +13,39 @@ import os from "node:os"
 import path from "node:path"
 import { spawnSync } from "node:child_process"
 import { fileURLToPath } from "node:url"
+import { bridgeNode } from "./silent-node.mjs"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 export const BRIDGE_PATH = path.join(__dirname, "bridge.mjs")
+export const GATEWAY_PLUGIN_ID = "ccgw-output-budget-v1"
+
+// Install only into the gateway's scratch location, never the user's global
+// plugin directory. OpenCode discovers directory plugins via index.mjs.
+export function installGatewayPlugin(dir) {
+  const target = path.join(dir, ".opencode", "plugins", "ccgw-budget", "index.mjs")
+  const source = fs.readFileSync(path.join(__dirname, "budget-plugin", "index.mjs"), "utf8")
+  fs.mkdirSync(path.dirname(target), { recursive: true })
+  if (!fs.existsSync(target) || fs.readFileSync(target, "utf8") !== source) fs.writeFileSync(target, source)
+  return target
+}
+
+export async function ensureGatewayPlugin(oc, dir, { timeoutMs = 30000 } = {}) {
+  const query = new URLSearchParams({ "location[directory]": dir })
+  const deadline = Date.now() + timeoutMs
+  // plugin.list returns its current inventory before the initial asynchronous
+  // activation has necessarily finished. Cold locations load global plugins as
+  // well; allow a bounded 30 seconds for local setup, without invoking inference
+  // or skipping the output-budget/retry guard if activation fails.
+  do {
+    const result = await oc.reqOrThrow("GET", "/api/plugin?" + query)
+    const plugin = result?.data?.find(x => x.id === GATEWAY_PLUGIN_ID)
+    if (plugin?.state?.status === "active") return
+    if (plugin?.state?.status === "failed" || Date.now() >= deadline) break
+    await sleep(100)
+  } while (true)
+  throw Object.assign(new Error("Gateway session plugin is not active; output budgets and retry ownership cannot be enforced. Reload the gateway scratch location and retry."),
+    { status: 503, code: "gateway_plugin_unavailable" })
+}
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -208,7 +238,7 @@ export async function putBridge(oc, dir, name, manifestPath, { timeoutMs = 15000
       body: JSON.stringify({
         config: {
           type: "local",
-          command: [process.execPath, BRIDGE_PATH, manifestPath],
+          command: [bridgeNode(), BRIDGE_PATH, manifestPath],
           codemode: false,
         },
       }),
@@ -345,6 +375,7 @@ export const READ_ONLY_PERMISSIONS = [
  *  - onToolCall({id, name, input, raw})  (name = original client tool name)
  *  - signal: AbortSignal (client disconnect)
  *  - timeoutMs
+ *  - maxOutputTokens: positive integer output-token cap for this request
  *  - log(contextObj, msg)
  *
  * returns { text, toolCalls, finish, error, sessionID, usage }
@@ -362,7 +393,14 @@ export async function runTurn(oc, opts) {
     timeoutMs = 180000,
     log = () => {},
     title = "ccgw",
+    maxOutputTokens,
+    files,
   } = opts
+
+  if (maxOutputTokens !== undefined && (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 1)) {
+    throw Object.assign(new Error("maxOutputTokens must be a positive safe integer"), { status: 400 })
+  }
+  signal?.throwIfAborted()
 
   const permissions = [...READ_ONLY_PERMISSIONS]
   if (bridgeName) permissions.push({ action: bridgeName + "_*", resource: "*", effect: "allow" })
@@ -370,15 +408,22 @@ export async function runTurn(oc, opts) {
   // Temp cleaners may delete the location directory while we run; recreate it
   // so session creation does not fail with LocationNotFoundError.
   fs.mkdirSync(dir, { recursive: true })
+  await ensureGatewayPlugin(oc, dir)
+  signal?.throwIfAborted()
 
   const sess = await oc.reqOrThrow("POST", "/api/session", {
     title,
     model,
     location: { directory: dir },
     permissions,
+    metadata: { ccgw: { managed: true, ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}) } },
   })
   const sid = sess.data?.id
   if (!sid) throw new Error("no session id in create response")
+  if (signal?.aborted) {
+    try { await oc.req('POST', `/api/session/${sid}/interrupt`, {}) } catch {}
+    signal.throwIfAborted()
+  }
 
   const state = {
     text: "",
@@ -588,7 +633,7 @@ export async function runTurn(oc, opts) {
   timeoutTimer = setTimeout(() => abortTurn("timeout"), timeoutMs)
 
   try {
-    await oc.reqOrThrow("POST", `/api/session/${sid}/prompt`, { text: promptText })
+    await oc.reqOrThrow("POST", `/api/session/${sid}/prompt`, { text: promptText, ...(files?.length ? {files} : {}) })
     await finished
   } finally {
     clearTimeout(timeoutTimer)
