@@ -3,7 +3,10 @@ param(
   [string]$Action = 'status',
   [string]$Target = '',
   [int]$ListenPort = 41800,
-  [int]$SocksPort = 1080
+  [int]$SocksPort = 1080,
+  [string]$IdentityFile = '',
+  [int]$SshPort = 0,
+  [string[]]$SshArg = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -27,6 +30,14 @@ function Get-BridgeProc {
   $bridgePid = (Get-Content $pidFile -Raw).Trim()
   if (-not $bridgePid) { return $null }
   return Get-Process -Id ([int]$bridgePid) -ErrorAction SilentlyContinue
+}
+
+function Get-ExtraArgs {
+  $extra = @()
+  if ($SshPort -gt 0) { $extra += @('--ssh-arg', '-p', '--ssh-arg', "$SshPort") }
+  if ($IdentityFile) { $extra += @('--ssh-arg', '-i', '--ssh-arg', $IdentityFile) }
+  foreach ($a in $SshArg) { $extra += @('--ssh-arg', $a) }
+  return $extra
 }
 
 function Stop-Bridge {
@@ -53,7 +64,8 @@ switch ($Action) {
   'check' {
     $t = Get-Target
     if (-not $t) { "ERROR: no target (pass -Target user@host or write zero-window/egress-ssh.target)"; exit 2 }
-    & node $script --target $t --check
+    $extra = Get-ExtraArgs
+    & node $script --target $t --check --listen-port $ListenPort --socks-port $SocksPort @extra
     exit $LASTEXITCODE
   }
   'start' {
@@ -61,8 +73,10 @@ switch ($Action) {
     if (-not $t) { "ERROR: no target (pass -Target user@host or write zero-window/egress-ssh.target)"; exit 2 }
     [void](Stop-Bridge)
     Start-Sleep -Milliseconds 500
-    $nodeArgs = @($script, '--target', $t, '--listen-port', $ListenPort, '--socks-port', $SocksPort)
-    $p = Start-Process -FilePath 'node' -ArgumentList $nodeArgs -WindowStyle Hidden -PassThru -RedirectStandardOutput $logFile -RedirectStandardError "$logFile.err"
+    $extra = Get-ExtraArgs
+    $nodeArgs = @($script, '--target', $t, '--listen-port', $ListenPort, '--socks-port', $SocksPort) + $extra
+    $quoted = $nodeArgs | ForEach-Object { if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ } }
+    $p = Start-Process -FilePath 'node' -ArgumentList $quoted -WindowStyle Hidden -PassThru -RedirectStandardOutput $logFile -RedirectStandardError "$logFile.err"
     Set-Content -Path $pidFile -Value $p.Id
     $ok = $false
     for ($i = 0; $i -lt 40; $i++) {

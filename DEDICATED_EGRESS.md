@@ -77,6 +77,10 @@ Set-Content .\ccgw\zero-window\egress-ssh.target 'ubuntu@<vm-ip>'
 .\ccgw\zero-window\egress-ssh.ps1 -Action start    # 后台起 ssh + 桥，写 pid 文件
 .\ccgw\zero-window\egress-ssh.ps1 -Action status
 .\ccgw\zero-window\egress-ssh.ps1 -Action stop     # 同时清理孤儿 ssh
+
+# 非 22 端口 / 指定私钥（云主机常见）
+.\ccgw\zero-window\egress-ssh.ps1 -Action check -IdentityFile C:\Users\me\.ssh\oracle -SshPort 2222
+.\ccgw\zero-window\egress-ssh.ps1 -Action start -IdentityFile C:\Users\me\.ssh\oracle -SshPort 2222
 ```
 
 一条命令接线/回退（会改 `gateway.vbs` 并重启网关，失败自动回滚）：
@@ -86,11 +90,17 @@ Set-Content .\ccgw\zero-window\egress-ssh.target 'ubuntu@<vm-ip>'
 # 1 自检桥 → 2 起桥 → 3 改 CCGW_EGRESS_UPSTREAM → 4 重启网关 → 5 真实回合
 # 任何一步失败：恢复 WARP、重启网关、停桥
 
+# 非 22 端口 / 指定私钥
+.\ccgw\zero-window\egress-ssh-wire.ps1 -Action wire -Target ubuntu@<vm-ip> -SshPort 2222 -IdentityFile C:\Users\me\.ssh\oracle
+
 .\ccgw\zero-window\egress-ssh-wire.ps1 -Action status   # 看当前 upstream / 桥 / egress
 .\ccgw\zero-window\egress-ssh-wire.ps1 -Action unwire   # 恢复原 upstream、重启、停桥、再跑一轮验证
 ```
 
 `wire` 的通过条件不是“端口通了”，而是真实回合成功且 `/health.egress.lastFamily === "proxy"`、`connections >= 1`；否则判定为没走桥并回滚。
+
+> **本机 SSH 服务不能替代云主机。** 已用本机 `ssh2` 服务实测：`check` 返回 `200`、SSH 认证与 `direct-tcpip` 全部正常，但真实回合仍被上游 **403**——因为出口 IP 还是本机 IP。`wire` 正确识别失败并回滚到 WARP。独享出口的价值在于**换 IP**，必须用云主机；传输层本身已经验证过。
+
 
 ## 方案 A（吞吐更好）
 

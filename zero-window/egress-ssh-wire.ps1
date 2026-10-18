@@ -2,7 +2,9 @@ param(
   [ValidateSet('wire', 'unwire', 'status')]
   [string]$Action = 'status',
   [string]$Target = '',
-  [int]$ListenPort = 41800
+  [int]$ListenPort = 41800,
+  [string]$IdentityFile = '',
+  [int]$SshPort = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -75,13 +77,15 @@ switch ($Action) {
     }
     if ($Target) { Set-Content -Path (Join-Path $root 'egress-ssh.target') -Value $Target }
     "1/5 checking the SSH bridge end to end"
-    if ($Target) { & $bridgeScript -Action check -Target $Target -ListenPort $ListenPort }
-    else { & $bridgeScript -Action check -ListenPort $ListenPort }
+    $bridgeArgs = @{ ListenPort = $ListenPort }
+    if ($Target) { $bridgeArgs.Target = $Target }
+    if ($IdentityFile) { $bridgeArgs.IdentityFile = $IdentityFile }
+    if ($SshPort -gt 0) { $bridgeArgs.SshPort = $SshPort }
+    & $bridgeScript -Action check @bridgeArgs
     if ($LASTEXITCODE -ne 0) { "ERROR: bridge check failed; gateway left untouched"; exit 1 }
 
     "2/5 starting the bridge"
-    if ($Target) { & $bridgeScript -Action start -Target $Target -ListenPort $ListenPort }
-    else { & $bridgeScript -Action start -ListenPort $ListenPort }
+    & $bridgeScript -Action start @bridgeArgs
 
     try {
       "3/5 pointing the gateway at $bridgeUpstream"

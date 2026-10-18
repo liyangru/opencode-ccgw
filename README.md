@@ -304,8 +304,11 @@ CC Switch 处于 proxy 模式时会**接管** `~/.claude/settings.json`:写入 `
 | 客户端 | 真实请求 | 结果 | ccgw 日志 |
 |---|---|---|---|
 | Claude Code CLI | `claude -p "Reply with exactly: CLAUDE-CLI-OK"` | `CLAUDE-CLI-OK` | `dialect=anthropic`,`slot:opus` → glm |
+| Claude Code 工具回合 | `claude -p "Use Bash ... echo CLAUDE-TOOL-OK"` | `CLAUDE-TOOL-OK .` | `toolCalls=Bash` → 结果回灌 → 文本 |
 | Claude Desktop 宿主路由 | `POST 15721/claude-desktop/v1/messages` + `ccs-` 令牌 | `DESK-RESTART-OK` | `slot:opus` → glm |
+| Claude Desktop 流式+工具 | 同上 + `stream:true` + `get_time` 工具 | `get_time {"city":"Seoul"}` | `toolCalls=get_time`,SSE 7 事件完整 |
 | Codex CLI | `codex exec ... "Reply with exactly: CODEX-FINAL-OK"` | `CODEX-FINAL-OK` | `dialect=responses`,`auto` → glm,`tools=11` |
+| Codex 工具回合 | `codex exec "Use shell ... echo CODEX-TOOL-OK"` | `CODEX-TOOL-OK` | `toolCalls=exec_command` → 结果回灌 → 文本 |
 
 三者的共同前置:CC Switch `15721` 在监听,`live-state.json` 的 `claude` / `claude-desktop` / `codex` 三条 `proxy_route` 都指向 ccgw provider。
 
