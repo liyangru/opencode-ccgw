@@ -319,6 +319,8 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 
   `clients` 读 `127.0.0.1:20241/metrics`（`cloudflared_tunnel_ha_connections` / `total_requests` / `request_errors`）。注意 `total_requests` 也包含自检请求，所以“0 客户端”只能作为趋势判断，不能当成绝对计数；真正的准入仍由 `CCGW_TOKEN` 强制（匿名 401）。
 
+  自检用 `HttpClient` 且 `UseProxy=false`：本机系统代理会间歇性拦 `trycloudflare.com`，走代理会把“隧道已注册”误判成失败。`start` 在自检不通过时会**主动停掉刚起的隧道**，不会留下未验证的公网入口；`stop` 只杀带 `--url 127.0.0.1:8317` / `--metrics 20241` 的 cloudflared，不影响用户自己的其他隧道。
+
   ngrok 固定域名的等价命令(运行器是 `zero-window\tunnel-ngrok.vbs`,机器本地生成、不入库):
 
   ```powershell

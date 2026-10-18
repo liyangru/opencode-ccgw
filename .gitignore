@@ -2,6 +2,7 @@
 ccgw.log
 *.log
 zero-window/tunnel.log*
+zero-window/tunnel.pid
 zero-window/egress-ssh.target
 zero-window/egress-ssh.pid
 zero-window/egress-ssh.log
