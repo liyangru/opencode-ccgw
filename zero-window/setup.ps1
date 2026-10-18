@@ -108,6 +108,27 @@ if (Test-Path $nordExe) {
   Write-Host "(NordVPN not found - skipping ccgw-netguard auto-switch registration)"
 }
 
+# --- WARP keepalive (optional): a windowless watchdog that reconnects WARP if it
+# drops (the backup egress the free tier accepts). Harmless when WARP is absent:
+# the script logs one line and exits.
+$warpCli = "C:\Program Files\Cloudflare\Cloudflare WARP\warp-cli.exe"
+if (Test-Path $warpCli) {
+  try {
+    $wgVbs = Join-Path $zw "warp-guard.vbs"
+    $wgAct = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "`"$wgVbs`""
+    $wgTrg = @(
+      (New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME),
+      (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) -RepetitionInterval (New-TimeSpan -Minutes 10) -RepetitionDuration (New-TimeSpan -Days 3650))
+    )
+    $wgSet = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable `
+      -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
+    Register-ScheduledTask -TaskName "ccgw-warp-guard" -Action $wgAct -Trigger $wgTrg -Settings $wgSet `
+      -Description "ccgw: reconnect WARP backup egress if it drops; never disconnects" -Force | Out-Null
+  } catch {
+    Write-Warning "ccgw-warp-guard task not registered ($($_.Exception.Message))"
+  }
+}
+
 # --- account pool config (seeded with the headless server above; add more
 # accounts later with zero-window\add-account.ps1, then restart the gateway)
 $accountsFile = Join-Path $zw "accounts.json"
