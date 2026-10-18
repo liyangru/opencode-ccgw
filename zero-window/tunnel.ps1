@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('start', 'stop', 'status', 'url', 'probe')]
+  [ValidateSet('start', 'stop', 'status', 'url', 'probe', 'clients')]
   [string]$Action = 'status'
 )
 
@@ -28,30 +28,45 @@ function Get-TunnelProcs {
   Get-CimInstance Win32_Process -Filter "Name = 'cloudflared.exe'" -ErrorAction SilentlyContinue
 }
 
+function Get-TunnelMetrics {
+  for ($i = 0; $i -lt 5; $i++) {
+    try {
+      return (Invoke-WebRequest 'http://127.0.0.1:20241/metrics' -TimeoutSec 3 -UseBasicParsing -ErrorAction Stop).Content
+    } catch { Start-Sleep -Seconds 1 }
+  }
+  return $null
+}
+
 function Stop-Tunnel {
   $procs = @(Get-TunnelProcs)
   foreach ($p in $procs) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }
   return $procs.Count
 }
 
+function Get-HttpStatus([string]$url, [hashtable]$headers) {
+  # A freshly minted quick-tunnel hostname is not resolvable for a few seconds,
+  # so a single probe reports a false failure. Retry only on "no response";
+  # a real HTTP status (401/200/...) is returned immediately.
+  for ($i = 0; $i -lt 8; $i++) {
+    try {
+      $r = Invoke-WebRequest -Uri $url -TimeoutSec 12 -UseBasicParsing -ErrorAction Stop -Headers $headers
+      return [int]$r.StatusCode
+    } catch {
+      $code = 0
+      if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode.value__ }
+      if ($code -ne 0) { return $code }
+      Start-Sleep -Seconds 3
+    }
+  }
+  return 0
+}
+
 function Test-PublicHealth([string]$url) {
   if (-not $url) { return @{ ok = $false; reason = 'no url' } }
   $token = Get-Token
-  $anon = $null
-  $auth = $null
-  try {
-    $r = Invoke-WebRequest -Uri "$url/health" -TimeoutSec 15 -UseBasicParsing -ErrorAction Stop
-    $anon = [int]$r.StatusCode
-  } catch {
-    $anon = [int]$_.Exception.Response.StatusCode.value__
-  }
+  $anon = Get-HttpStatus "$url/health" @{}
   if (-not $token) { return @{ ok = $false; reason = 'no token in gateway.vbs'; anon = $anon } }
-  try {
-    $r = Invoke-WebRequest -Uri "$url/health" -TimeoutSec 20 -UseBasicParsing -ErrorAction Stop -Headers @{ Authorization = "Bearer $token" }
-    $auth = [int]$r.StatusCode
-  } catch {
-    $auth = [int]$_.Exception.Response.StatusCode.value__
-  }
+  $auth = Get-HttpStatus "$url/health" @{ Authorization = "Bearer $token" }
   return @{ ok = ($anon -eq 401 -and $auth -eq 200); anon = $anon; auth = $auth }
 }
 
@@ -79,6 +94,16 @@ switch ($Action) {
     "anonymous=$($r.anon) authorized=$($r.auth) ok=$($r.ok) $($r.reason)"
     if (-not $r.ok) { exit 1 }
   }
+  'clients' {
+    # Answers "is anyone actually using the tunnel?" without relying on the
+    # gateway log (cloudflared lands on loopback, so the gateway cannot tell
+    # tunnel traffic from local clients by address).
+    $m = Get-TunnelMetrics
+    if (-not $m) { "metrics=unavailable (tunnel not running)"; exit 1 }
+    $lines = $m -split "`n" | Where-Object { $_ -match '^cloudflared_(tunnel_(total_requests|request_errors|active_connections|ha_connections)|tunnel_total_requests)' }
+    if (-not $lines) { $lines = $m -split "`n" | Where-Object { $_ -match '^cloudflared_.*(request|connection)' } | Select-Object -First 12 }
+    $lines | ForEach-Object { "  " + $_.Trim() }
+  }
   'stop' {
     $n = Stop-Tunnel
     "stopped $n cloudflared process(es)"
@@ -88,7 +113,7 @@ switch ($Action) {
     Start-Sleep -Seconds 1
     if (Test-Path $log) { Move-Item $log "$log.old" -Force }
     Start-Process -FilePath $cloudflared -WindowStyle Hidden -ArgumentList @(
-      'tunnel', '--no-autoupdate', '--url', $gateway, '--logfile', $log, '--loglevel', 'info'
+      'tunnel', '--no-autoupdate', '--url', $gateway, '--logfile', $log, '--loglevel', 'info', '--metrics', '127.0.0.1:20241'
     )
     $url = $null
     for ($i = 0; $i -lt 40; $i++) {

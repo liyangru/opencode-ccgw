@@ -1,5 +1,8 @@
 // test-ranking.mjs 鈥?quick self-checks for ranking.mjs (run: node test-ranking.mjs)
 import assert from "node:assert"
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
 import { AUTO_ALIASES, DEFAULT_ORDER, DEFAULT_SLOTS, DEFAULT_VISION_TRUSTED, fallbackChain, isFreeModel, loadRankConfig, matchSlot, pickModel, rankFree } from "./ranking.mjs"
 
 // --- free detection -------------------------------------------------------
@@ -111,6 +114,50 @@ assert.deepEqual(pickModel({ ...base, slots: { ...slots, haiku: "gone-model-free
 assert.deepEqual(pickModel({ ...base, ranked: [], requested: "claude-sonnet-5-5" }), { model: "deepseek-v4.1-flash-free", source: "slot:sonnet" })
 assert.deepEqual(pickModel({ ...base, ranked: [], slots: {}, requested: "claude-sonnet-5-5" }), { model: "claude-sonnet-5-5", source: "passthrough" })
 assert.deepEqual(pickModel({ ...base, ranked: [], slots: {}, requested: "nope" }), { model: "glm-5.3-flash-free", source: "static" })
+
+// --- pin + images: a pin is a slot-like default, so it obeys the vision rule -
+assert.deepEqual(
+  pickModel({ ...base, pin: "deepseek-v4.1-flash-free", requested: "totally-made-up", hasFiles: true }),
+  { model: "nemotron-3.5-super-vl-free", source: "slot:vision" },
+  "pin to an image-capable but vision-untrusted model is redirected for image turns")
+assert.deepEqual(
+  pickModel({ ...base, pin: "glm-5.3-flash-free", requested: "totally-made-up", hasFiles: true }),
+  { model: "glm-5.3-flash-free", source: "default" },
+  "pin to a vision-trusted model is kept for image turns")
+assert.deepEqual(
+  pickModel({ ...base, pin: "glm-5.3-flash-free", requested: "auto", hasFiles: true }),
+  { model: "glm-5.3-flash-free", source: "alias" },
+  "auto alias with a trusted pin stays")
+
+// --- custom visionTrusted -------------------------------------------------
+const onlyGlm = ["glm-5.3-flash-free"]
+assert.deepEqual(
+  pickModel({ ...base, requested: "claude-sonnet-5-5", hasFiles: true, visionTrusted: onlyGlm }),
+  { model: "glm-5.3-flash-free", source: "vision" },
+  "when the vision slot itself is untrusted, the first trusted ranked model is used")
+assert.deepEqual(
+  fallbackChain({ ranked: ranked04, model: "glm-5.3-flash-free", source: "slot:opus", imageOk: image, hasFiles: true, visionTrusted: onlyGlm }),
+  ["glm-5.3-flash-free"],
+  "image chain tail honours a custom visionTrusted list")
+
+// --- rank file hot reload (order + slots + visionTrusted) -----------------
+const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ccgw-rank-"))
+const tmpFile = path.join(tmpDir, "ranks.json")
+fs.writeFileSync(tmpFile, JSON.stringify({ order: ["a-free"], slots: { opus: "a-free" }, visionTrusted: ["a-free"] }))
+const c1 = loadRankConfig(tmpFile)
+assert.deepEqual(c1.order, ["a-free"], "temp rank file order is read")
+assert.deepEqual(c1.slots.opus, "a-free", "temp rank file slots are merged")
+assert.deepEqual(c1.visionTrusted, ["a-free"], "temp rank file visionTrusted is read")
+fs.writeFileSync(tmpFile, JSON.stringify({ order: ["b-free"], slots: { opus: "b-free" }, visionTrusted: ["b-free"] }))
+fs.utimesSync(tmpFile, new Date(), new Date(Date.now() + 2000))
+const c2 = loadRankConfig(tmpFile)
+assert.deepEqual(c2.order, ["b-free"], "mtime change reloads the rank file")
+assert.deepEqual(c2.visionTrusted, ["b-free"], "visionTrusted reloads with the file")
+fs.rmSync(tmpDir, { recursive: true, force: true })
+const missing = loadRankConfig(path.join(tmpDir, "nope.json"))
+assert.deepEqual(missing.order, DEFAULT_ORDER, "missing file falls back to the built-in order")
+assert.deepEqual(missing.visionTrusted, DEFAULT_VISION_TRUSTED, "missing file falls back to the built-in visionTrusted")
+
 
 console.log("test-ranking: all checks passed (" + AUTO_ALIASES.size + " aliases, " + ranked.length + " ranked, " + Object.keys(slots).length + " slots)")
 

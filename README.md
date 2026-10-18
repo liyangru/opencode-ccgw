@@ -251,12 +251,14 @@ export API_TIMEOUT_MS=600000                                       # 大模型�
 |---|---|
 | base_url | `http://127.0.0.1:8317/v1` |
 | 上游格式 | **Responses(native)** |
-| Model | 任意(如 `gpt-5.6-sol`),实际由网关路由到默认模型 |
+| Model | 推荐 `auto`(或 `best-free`);写具体免费模型名会变成“显式指名”,失去模型级降级 |
+
+**实测(2026-10-19):** `POST /v1/responses` 带 `Authorization: Bearer ccgw-local` 返回 200,`output_text = CODEX-OK`,ccgw 日志 `dialect=responses`。同一入口的 `/v1/chat/completions` 也返回 200。
 
 手工配置等价于 `~/.codex/config.toml`:
 
 ```toml
-model = "gpt-5.6-sol"
+model = "auto"
 model_provider = "ccgw"
 
 [model_providers.ccgw]
@@ -264,6 +266,8 @@ name = "ccgw"
 base_url = "http://127.0.0.1:8317/v1"
 wire_api = "responses"
 ```
+
+> 为什么推荐 `auto`:它解析为当前排名第一的免费模型(`source=alias`),并带上完整降级链;写成 `deepseek-v4.1-flash-free` 这类具体名字会得到 `source=requested`,上游报 `Model unavailable` 时不会换模型。CC Switch 里 `ccgw (OpenCode)` 的 codex provider 目前**不是当前项**(官方 ChatGPT 仍是 current),路由已配好、协议已实测,切换即可用。
 
 ### Claude Desktop
 
@@ -309,8 +313,11 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
   ```powershell
   .\ccgw\zero-window\tunnel.ps1 -Action start   # 新建隧道并打印 url，同时验证 401/200
   .\ccgw\zero-window\tunnel.ps1 -Action probe   # 复验当前 url
+  .\ccgw\zero-window\tunnel.ps1 -Action clients # 看 cloudflared 指标：连接数/请求数/错误数
   .\ccgw\zero-window\tunnel.ps1 -Action stop    # 收回公网入口
   ```
+
+  `clients` 读 `127.0.0.1:20241/metrics`（`cloudflared_tunnel_ha_connections` / `total_requests` / `request_errors`）。注意 `total_requests` 也包含自检请求，所以“0 客户端”只能作为趋势判断，不能当成绝对计数；真正的准入仍由 `CCGW_TOKEN` 强制（匿名 401）。
 
   ngrok 固定域名的等价命令(运行器是 `zero-window\tunnel-ngrok.vbs`,机器本地生成、不入库):
 

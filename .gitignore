@@ -2,6 +2,10 @@
 ccgw.log
 *.log
 zero-window/tunnel.log*
+zero-window/egress-ssh.target
+zero-window/egress-ssh.pid
+zero-window/egress-ssh.log
+zero-window/egress-ssh.log.err
 node_modules/
 ccswitch-links.txt
 .ccgw-state.json*

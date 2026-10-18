@@ -69,6 +69,16 @@ ccgw ──CONNECT──> 127.0.0.1:41800 (egress-ssh.mjs, HTTP CONNECT)
 
 > 桥接器有离线回归：`node ccgw\test-egress-ssh.mjs`（9 条断言：ssh 参数、允许目标 200、载荷透传、非白名单 403、SOCKS 不可达 502）。
 
+常驻/自检也可以走包装脚本（写入目标后无需每次带参数）：
+
+```powershell
+Set-Content .\ccgw\zero-window\egress-ssh.target 'ubuntu@<vm-ip>'
+.\ccgw\zero-window\egress-ssh.ps1 -Action check    # 端到端 CONNECT 自检
+.\ccgw\zero-window\egress-ssh.ps1 -Action start    # 后台起 ssh + 桥，写 pid 文件
+.\ccgw\zero-window\egress-ssh.ps1 -Action status
+.\ccgw\zero-window\egress-ssh.ps1 -Action stop     # 同时清理孤儿 ssh
+```
+
 ## 方案 A（吞吐更好）
 
 1. 本机装 WireGuard，配置里 **`AllowedIPs = 10.66.66.2/32`**（只路由到 VM 的隧道地址，不写 `0.0.0.0/0`）。
