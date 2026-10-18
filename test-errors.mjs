@@ -12,6 +12,15 @@ const root = path.dirname(fileURLToPath(import.meta.url))
 const denied = "OpenCode's free tier can only be used from within OpenCode. Download it at https://opencode.ai and keep building."
 const listen = (server) => new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server.address().port)))
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+async function waitFor(fn, ms = 2000) {
+  const deadline = Date.now() + ms
+  for (;;) {
+    const value = fn()
+    if (value) return value
+    if (Date.now() >= deadline) return null
+    await delay(20)
+  }
+}
 
 async function fixture(error, run, options = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ccgw-error-test-"))
@@ -20,8 +29,9 @@ async function fixture(error, run, options = {}) {
   let serial = 0
   const sessions = new Map()
   const hits = []
-  const upstream = http.createServer(async (req, res) => {
+  const makeUpstream = () => http.createServer(async (req, res) => {
     const u = new URL(req.url, "http://localhost")
+    if (u.pathname === "/__probe") { res.writeHead(200, { "content-type": "text/plain" }); res.end("fixture"); return }
     const account = u.pathname.split("/")[1]
     const route = u.pathname.slice(account.length + 1)
     const json = (body) => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify(body)) }
@@ -63,7 +73,20 @@ async function fixture(error, run, options = {}) {
       }, emitDelay)
     } else { req.resume(); json({}) }
   })
-  const upstreamPort = await listen(upstream)
+  // A live account may be restarting on the same port; prove this port reaches
+  // this fixture's server before the gateway child starts using it.
+  let upstream = null
+  let upstreamPort = 0
+  for (let attempt = 0; attempt < 5; attempt++) {
+    upstream = makeUpstream()
+    upstreamPort = await listen(upstream)
+    const probe = await fetch(`http://127.0.0.1:${upstreamPort}/__probe`).then((r) => r.text()).catch(() => "")
+    if (probe === "fixture") break
+    upstream.closeAllConnections?.()
+    await new Promise((resolve) => upstream.close(resolve))
+    upstream = null
+  }
+  if (!upstream?.listening) throw new Error("fixture upstream could not bind a reachable port")
   const reservation = http.createServer()
   const gatewayPort = await listen(reservation)
   await new Promise((resolve) => reservation.close(resolve))
@@ -168,7 +191,15 @@ test('success log reports the model that actually served after a fallback', asyn
     const r = await f.post('/v1/messages', { model: 'claude-opus-5', max_tokens: 64, messages: [{ role: 'user', content: 'diagnostic' }] })
     assert.equal(r.status, 200)
     assert.deepEqual(f.hits().map((h) => h.model), ['glm-5.3-flash-free', 'deepseek-v4.1-flash-free'])
-    const done = f.log().trim().split('\n').map((l) => JSON.parse(l)).filter((l) => l.reqId && l.textLen !== undefined).pop()
+    // The gateway appends log lines asynchronously; poll instead of assuming the
+    // success line is already on disk.
+    const readDone = () => {
+      try {
+        return f.log().trim().split('\n').map((l) => JSON.parse(l)).filter((l) => l.reqId && l.textLen !== undefined).pop()
+      } catch { return null }
+    }
+    const done = await waitFor(readDone)
+    assert.ok(done, 'the success log line was written')
     assert.equal(done.model, 'deepseek-v4.1-flash-free')
     assert.equal(done.modelSource, 'slot:opus')
   }, { models: ['glm-5.3-flash-free', 'deepseek-v4.1-flash-free'] })
