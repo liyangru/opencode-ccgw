@@ -23,14 +23,23 @@ function Get-GatewayUpstream {
 }
 
 function Set-GatewayUpstream([string]$url) {
-  if (-not (Test-Path $bak)) { Copy-Item $vbs $bak -Force }
   $text = Get-Content $vbs -Raw
   $pattern = 'CCGW_EGRESS_UPSTREAM"\)\s*=\s*"[^"]*"'
   if (-not [regex]::IsMatch($text, $pattern)) { throw "gateway.vbs does not contain a CCGW_EGRESS_UPSTREAM line" }
+  if (-not (Test-Path $bak)) { Copy-Item $vbs $bak -Force }
   $replacement = 'CCGW_EGRESS_UPSTREAM") = "' + $url + '"'
   $new = [regex]::Replace($text, $pattern, $replacement)
   # gateway.vbs is UTF-16LE (wscript needs the BOM); keep that encoding.
   Set-Content -Path $vbs -Value $new -Encoding Unicode -NoNewline
+}
+
+function Get-PreviousUpstream {
+  $orig = $warpUpstream
+  if (Test-Path $bak) {
+    $m = Select-String -Path $bak -Pattern 'CCGW_EGRESS_UPSTREAM"\)\s*=\s*"([^"]+)"' | Select-Object -First 1
+    if ($m) { $orig = $m.Matches[0].Groups[1].Value }
+  }
+  return $orig
 }
 
 function Restart-Gateway {
@@ -102,8 +111,9 @@ switch ($Action) {
       "OK upstream=$(Get-GatewayUpstream) egress.lastFamily=$($h2.egress.lastFamily) connections=$($h2.egress.connections)"
     } catch {
       "FAILED: $($_.Exception.Message)"
-      "rolling back to $warpUpstream"
-      try { Set-GatewayUpstream $warpUpstream } catch {}
+      $orig = Get-PreviousUpstream
+      "rolling back to $orig"
+      try { Set-GatewayUpstream $orig } catch {}
       try { [void](Restart-Gateway) } catch {}
       & $bridgeScript -Action stop
       exit 1
@@ -111,11 +121,7 @@ switch ($Action) {
   }
   'unwire' {
     "1/3 restoring the previous upstream"
-    $orig = $warpUpstream
-    if (Test-Path $bak) {
-      $m = Select-String -Path $bak -Pattern 'CCGW_EGRESS_UPSTREAM"\)\s*=\s*"([^"]+)"' | Select-Object -First 1
-      if ($m) { $orig = $m.Matches[0].Groups[1].Value }
-    }
+    $orig = Get-PreviousUpstream
     Set-GatewayUpstream $orig
     "2/3 restarting the gateway"
     $h = Restart-Gateway

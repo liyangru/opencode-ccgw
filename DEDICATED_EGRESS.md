@@ -88,7 +88,7 @@ Set-Content .\ccgw\zero-window\egress-ssh.target 'ubuntu@<vm-ip>'
 ```powershell
 .\ccgw\zero-window\egress-ssh-wire.ps1 -Action wire -Target ubuntu@<vm-ip>
 # 1 自检桥 → 2 起桥 → 3 改 CCGW_EGRESS_UPSTREAM → 4 重启网关 → 5 真实回合
-# 任何一步失败：恢复 WARP、重启网关、停桥
+# 任何一步失败：恢复接线前的 upstream、重启网关、停桥
 
 # 非 22 端口 / 指定私钥
 .\ccgw\zero-window\egress-ssh-wire.ps1 -Action wire -Target ubuntu@<vm-ip> -SshPort 2222 -IdentityFile C:\Users\me\.ssh\oracle
