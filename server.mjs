@@ -53,7 +53,7 @@ import {
   modelsOpenAI,
   countTokensApprox,
 } from "./formats.mjs"
-import { describeRanked, isFreeModel, loadRankConfig, pickModel, rankFree } from "./ranking.mjs"
+import { describeRanked, fallbackChain as fallbackChainFn, isFreeModel, loadRankConfig, pickModel, rankFree } from "./ranking.mjs"
 import { classifyError } from "./errors.mjs"
 import { loadCooldowns, saveCooldowns } from './cooldowns.mjs'
 import {attachEgress,readEgressKey} from './egress.mjs'
@@ -428,9 +428,10 @@ async function handleTurn({ dialect, body, req, res }) {
   const rankCfg = loadRankConfig()
   const ranked = rankFree(models.list, rankCfg.order)
   const freeSet = new Set(models.list.filter((m) => m.free).map((m) => m.id))
-  const pick = pickModel({ requested: canon.model, ids: new Set(models.ids), freeSet, ranked, slots: rankCfg.slots, pin: PIN, fallback: FALLBACK_MODEL })
+  const pick = pickModel({ requested: canon.model, ids: new Set(models.ids), freeSet, ranked, slots: rankCfg.slots, pin: PIN, fallback: FALLBACK_MODEL, hasFiles: !!canon.files?.length, visionTrusted: rankCfg.visionTrusted })
   const model = pick.model
-  if(canon.files?.length && !models.list.find(m=>m.id===model)?.input?.includes('image')) {
+  const supportsImage = (id) => !!models.list.find(m=>m.id===id)?.input?.includes('image')
+  if(canon.files?.length && !supportsImage(model)) {
     return json(res,400,{error:{type:'invalid_request_error',message:'所选模型不支持图片，请选择支持图片的模型，如 GLM 或 DeepSeek。'}})
   }
   const inputTokens = countTokensApprox(canon)
@@ -450,6 +451,13 @@ async function handleTurn({ dialect, body, req, res }) {
   }
 
   const promptText = renderPrompt(canon, bridgeName, nameMap?.origToSan)
+
+  // Model-level fallback chain (see ranking.mjs fallbackChain()).
+  const fallback = fallbackChainFn({
+    ranked, model, source: pick.source,
+    imageOk: supportsImage, hasFiles: !!canon.files?.length,
+    visionTrusted: rankCfg.visionTrusted,
+  })
 
   let stream = null
   const startStream = () => {
@@ -482,19 +490,26 @@ async function handleTurn({ dialect, body, req, res }) {
   let account = null
   let emitted = false
   const tried = new Set()
+  let activeModel = model
   try {
     await sem.acquire()
     try {
-      for (let attempt = 0; attempt < accounts.length; attempt++) {
+      // Outer loop: the model actually used may move down the fallback chain
+      // when the upstream reports a model as unavailable.
+      const modelQueue = [...fallback]
+      for (;;) {
+        // Inner loop: rotate across the accounts for the current model.
+        for (let attempt = 0; attempt < accounts.length; attempt++) {
         if (ac.signal.aborted) throw new Error("Client disconnected")
-        const a = pickAccount(tried, model)
+        const a = pickAccount(tried, activeModel)
         if (!a) {
-          error = coolingError(model)
+          if (modelQueue.length > 1) break // exhausted every account for this model; try the next one
+          error = coolingError(activeModel)
           break
         }
         tried.add(a.name)
         account = a
-        const started = { networkUntil: a.coolingUntil, rateLimit: a.rateLimits.get(model) }
+        const started = { networkUntil: a.coolingUntil, rateLimit: a.rateLimits.get(activeModel) }
         let r = null
         let e = null
         let bridgeOk = false
@@ -505,7 +520,7 @@ async function handleTurn({ dialect, body, req, res }) {
           }
           r = await runTurn(a.client, {
             dir: SCRATCH,
-            model: { providerID: "opencode", id: model },
+            model: { providerID: "opencode", id: activeModel },
             promptText,
             maxOutputTokens: canon.maxOutputTokens,
             files: canon.files,
@@ -538,7 +553,8 @@ async function handleTurn({ dialect, body, req, res }) {
         if (!failMsg) {
           result = r
           sid = r.sessionID
-          markOk(a, model, started)
+          markOk(a, activeModel, started)
+          activeModel = null // success: leave both loops
           break
         }
 
@@ -547,7 +563,7 @@ async function handleTurn({ dialect, body, req, res }) {
         const limited = failure.kind === "rate_limit"
         const down = failure.kind === "network"
         if (!clientGone) {
-          if (limited) coolDown(a, "rate-limited: " + failMsg.slice(0, 160), COOLDOWN_SECONDS, model, failure.retryAfterSeconds)
+          if (limited) coolDown(a, "rate-limited: " + failMsg.slice(0, 160), COOLDOWN_SECONDS, activeModel, failure.retryAfterSeconds)
           else if (down) coolDown(a, "unreachable: " + failMsg.slice(0, 160), DOWN_COOLDOWN_SECONDS)
           else {
             // Admission/authentication refusals are not evidence of exhausted quota.
@@ -556,13 +572,30 @@ async function handleTurn({ dialect, body, req, res }) {
             notePoolState()
           }
         }
+        const modelUnavailable = failure.kind === "upstream"
         const rotatable = !clientGone && !emitted && attempt < accounts.length - 1 && (limited || down)
         if (rotatable) {
           logLine({ reqId, phase: "rotate", account: a.name, msg: "failed (" + (limited ? "rate limited" : "unreachable") + "), trying next account: " + failMsg.slice(0, 160) })
           continue
         }
+
+        // No account left to try for this model. A model-level refusal (e.g.
+        // "Endpoint is unavailable") is not a quota or admission problem, so move
+        // down the ranked list instead of failing the request; 429/403 are
+        // terminal for this request by design.
+        if (!clientGone && !emitted && modelUnavailable && modelQueue.length > 1) {
+          const next = modelQueue[1]
+          logLine({ reqId, phase: "model-fallback", account: a.name, from: activeModel, to: next, msg: "upstream refused the model (" + failMsg.slice(0, 120) + "), trying next ranked model" })
+          activeModel = next
+          modelQueue.shift()
+          tried.clear()
+          attempt = -1
+          continue
+        }
         error = e || r?.error || new Error(failMsg)
         break
+        }
+        if (activeModel === null || error) break
       }
     } finally {
       sem.release()

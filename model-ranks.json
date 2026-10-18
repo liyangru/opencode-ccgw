@@ -1,21 +1,27 @@
 {
   "$comment": "ccgw free-model preference order (best -> worst) + Claude-style slot mapping. Free models are auto-discovered from the accounts' live catalogs (cost 0/0 or a -free suffix); anything not listed here is appended automatically. Hot-reloaded within a minute. Keep 'order' in sync with DEFAULT_ORDER in ranking.mjs (this file wins). Slots: a requested name containing haiku/sonnet/opus/fable (or exactly vision/image/vl) resolves to the slot's model - Claude Code sends hard-coded claude-* names for background tasks and aliases; slot targets must be free models or the request falls back to the top-ranked one.",
   "order": [
-    "deepseek-v4.1-flash-free",
-    "space-bunny-free",
-    "longcat-2.5-preview-free",
-    "beam-free",
-    "nemotron-3.5-super-vl-free",
-    "nemotron-3-ultra-free",
-    "mimo-v2.6-flash-free",
-    "big-pickle",
     "glm-5.3-flash-free",
+    "nemotron-3.5-super-vl-free",
+    "mimo-v2.6-flash-free",
+    "deepseek-v4.1-flash-free",
+    "beam-free",
+    "space-bunny-free",
+    "jev-1.13-free",
+    "nemotron-3-ultra-free",
+    "longcat-2.5-preview-free",
+    "big-pickle",
     "nemotron-3.5-lightning-free"
   ],
   "slots": {
-    "opus": "deepseek-v4.1-flash-free",
-    "sonnet": "longcat-2.5-preview-free",
-    "haiku": "space-bunny-free",
+    "opus": "glm-5.3-flash-free",
+    "sonnet": "deepseek-v4.1-flash-free",
+    "haiku": "mimo-v2.6-flash-free",
     "vision": "nemotron-3.5-super-vl-free"
-  }
+  },
+  "visionTrusted": [
+    "glm-5.3-flash-free",
+    "nemotron-3.5-super-vl-free",
+    "mimo-v2.6-flash-free"
+  ]
 }

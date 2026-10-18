@@ -1,0 +1,84 @@
+# 独享出口评估（2026-10-19）
+
+## 为什么需要
+
+当前 ccgw 的后台上游走 Cloudflare WARP 的**本机 proxy 模式**（`127.0.0.1:41700`），只影响 ccgw 自己，不改变整机路由。它的三个硬限制：
+
+1. **不能选国家**：消费版 `warp-cli` 只有 `tunnel endpoint set`，本机反复重拨始终落在新加坡边缘（`colo=SIN`）。
+2. **出口 IP 与他人共享**：同一个 Cloudflare 出口可能被其他用户的行为连累；403 的 `Detect Abuse Traffic` 是 IP 维度。
+3. **免费、无 SLA**：WARP 掉线要靠 `warp-guard` / `ccgw-warp-rotate` 兜。
+
+目标不是"绕过限制"，而是拿到一个**稳定、可控、只属于自己**的出口，让 403 与延迟波动不再随别人的行为变化。
+
+## 硬约束（来自 `AGENTS.md`）
+
+- **不得为了网关改变整机 VPN/代理**，不能影响 OpenCode 桌面端等官方客户端的原生连接。
+- 因此 WireGuard **不能装默认路由**。只允许"仅到目标主机的路由 + 进程级代理"。
+- 出口只服务 ccgw 的上游请求；其他程序保持直连。
+
+## 方案对比
+
+| 方案 | 成本 | 出口 IP | 选国家 | 对整机路由的影响 | 复杂度 |
+|---|---|---|---|---|---|
+| **A. Oracle Cloud Always Free + WireGuard(受限 AllowedIPs) + 远端 HTTP CONNECT 代理** | 0（Always Free） | 固定 | ✅ | 无（只加一条 /32 主机路由） | 中 |
+| **B. Oracle Cloud Always Free + SSH 动态转发(`ssh -D`) + 本机 HTTP→SOCKS 桥** | 0 | 固定 | ✅ | 无（只有 ssh 进程） | 低 |
+| C. 低价 VPS（Hetzner / Contabo / RackNerd） | ~€4–6/月 | 固定 | ✅ | 同 A/B | 低 |
+| D. 继续 WARP | 0 | 共享、不可选 | ❌ | 无 | 最低 |
+
+**推荐顺序：B → A → C。** 理由：B 不改任何网络栈、不装驱动、不碰路由表，出问题只需杀掉 `ssh` 进程；A 吞吐更好但引入 WireGuard 适配器与一条路由；C 只在 Always Free 开不出来时考虑。
+
+## 方案 B（推荐先做）
+
+```text
+ccgw ──CONNECT──> 127.0.0.1:41800 (gost, HTTP proxy)
+                        │
+                        └──SOCKS5──> 127.0.0.1:1080 (ssh -D)
+                                          │
+                                          └──> Oracle VM ──> opencode.ai:443
+```
+
+1. 在 Oracle Cloud 创建 Always Free 实例（`VM.Standard.A1.Flex`，1–4 OCPU / 6–24 GB，Ubuntu 24.04）。
+2. 安全列表只放行 SSH（22），**不要**对公网开放代理端口。
+3. 本机建立动态转发（只在本机监听）：
+
+   ```powershell
+   ssh -N -D 127.0.0.1:1080 -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes ubuntu@<vm-ip>
+   ```
+
+4. 本机用 `gost` 把 HTTP CONNECT 桥到 SOCKS5：
+
+   ```powershell
+   gost -L http://127.0.0.1:41800 -F socks5://127.0.0.1:1080
+   ```
+
+5. 让 ccgw 走它（与 WARP 同一个入口，不需要改代码）：
+
+   ```powershell
+   $env:CCGW_EGRESS_UPSTREAM = "http://127.0.0.1:41800"
+   ```
+
+6. 验证（必须走真实客户端，不能裸 curl）：用 Claude Code / Codex 发一次真实请求，确认 ccgw 日志 `served`，并确认出口 IP 是 VM 的 IP。
+
+## 方案 A（吞吐更好）
+
+1. 本机装 WireGuard，配置里 **`AllowedIPs = 10.66.66.2/32`**（只路由到 VM 的隧道地址，不写 `0.0.0.0/0`）。
+2. VM 上跑 HTTP CONNECT 代理（`gost -L http://10.66.66.2:41800` 或 3proxy），只监听隧道地址。
+3. `CCGW_EGRESS_UPSTREAM=http://10.66.66.2:41800`。
+4. 自检：`Get-NetRoute` 里不应出现新的 `0.0.0.0/0`；`tracert` 普通目标仍走家宽。
+
+## 验证清单
+
+- [ ] `CCGW_EGRESS_UPSTREAM` 生效后，ccgw `/health.egress.lastFamily` 显示 `proxy`。
+- [ ] 真实客户端请求成功（`ccgw.log` 有 `served`，不是只有 `/health` 可达）。
+- [ ] 出口 IP = 云主机 IP（在 VM 上 `curl ifconfig.me` 与网关侧观测一致）。
+- [ ] 整机默认路由未改变（`Get-NetRoute -DestinationPrefix 0.0.0.0/0` 仍指向家宽）。
+- [ ] 断掉隧道后 ccgw 有明确失败日志，且**不会**自动改整机网络。
+- [ ] OpenCode 桌面端仍走原生连接（不经过新出口）。
+
+## 需要用户提供
+
+- 云账号（Oracle Always Free 或任意 VPS）与实例的 SSH 访问方式。
+- 期望的出口国家/地区（决定 VM 区域）。
+- 是否允许在本机安装 `gost`（单文件、仅本机监听）或 WireGuard 客户端。
+
+在拿到这些之前，本机继续用 WARP；`ccgw-warp-rotate` 保持每 30 分钟轮换，`ccgw-netguard` 保持待命。
