@@ -16,6 +16,7 @@ zero-window/*.dpapi
 zero-window/headless-service.json
 zero-window/serve.vbs
 zero-window/gateway.vbs
+zero-window/gateway.vbs.egress-bak
 zero-window/tunnel.vbs
 zero-window/tunnel-ngrok.vbs
 

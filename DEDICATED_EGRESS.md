@@ -79,6 +79,19 @@ Set-Content .\ccgw\zero-window\egress-ssh.target 'ubuntu@<vm-ip>'
 .\ccgw\zero-window\egress-ssh.ps1 -Action stop     # 同时清理孤儿 ssh
 ```
 
+一条命令接线/回退（会改 `gateway.vbs` 并重启网关，失败自动回滚）：
+
+```powershell
+.\ccgw\zero-window\egress-ssh-wire.ps1 -Action wire -Target ubuntu@<vm-ip>
+# 1 自检桥 → 2 起桥 → 3 改 CCGW_EGRESS_UPSTREAM → 4 重启网关 → 5 真实回合
+# 任何一步失败：恢复 WARP、重启网关、停桥
+
+.\ccgw\zero-window\egress-ssh-wire.ps1 -Action status   # 看当前 upstream / 桥 / egress
+.\ccgw\zero-window\egress-ssh-wire.ps1 -Action unwire   # 恢复原 upstream、重启、停桥、再跑一轮验证
+```
+
+`wire` 的通过条件不是“端口通了”，而是真实回合成功且 `/health.egress.lastFamily === "proxy"`、`connections >= 1`；否则判定为没走桥并回滚。
+
 ## 方案 A（吞吐更好）
 
 1. 本机装 WireGuard，配置里 **`AllowedIPs = 10.66.66.2/32`**（只路由到 VM 的隧道地址，不写 `0.0.0.0/0`）。

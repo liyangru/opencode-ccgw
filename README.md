@@ -249,9 +249,10 @@ export API_TIMEOUT_MS=600000                                       # 大模型�
 
 | 字段 | 值 |
 |---|---|
-| base_url | `http://127.0.0.1:8317/v1` |
+| base_url(手工直连) | `http://127.0.0.1:8317/v1` |
+| base_url(经 CC Switch) | `http://127.0.0.1:15721/v1` |
 | 上游格式 | **Responses(native)** |
-| Model | 推荐 `auto`(或 `best-free`);写具体免费模型名会变成“显式指名”,失去模型级降级 |
+| Model | `auto`(或 `best-free`);写具体免费模型名会变成“显式指名”,失去模型级降级 |
 
 **实测(2026-10-19):** `POST /v1/responses` 带 `Authorization: Bearer ccgw-local` 返回 200,`output_text = CODEX-OK`,ccgw 日志 `dialect=responses`。同一入口的 `/v1/chat/completions` 也返回 200。
 
@@ -267,7 +268,18 @@ base_url = "http://127.0.0.1:8317/v1"
 wire_api = "responses"
 ```
 
-> 为什么推荐 `auto`:它解析为当前排名第一的免费模型(`source=alias`),并带上完整降级链;写成 `deepseek-v4.1-flash-free` 这类具体名字会得到 `source=requested`,上游报 `Model unavailable` 时不会换模型。CC Switch 里 `ccgw (OpenCode)` 的 codex provider 目前**不是当前项**(官方 ChatGPT 仍是 current),路由已配好、协议已实测,切换即可用。
+> 为什么推荐 `auto`:它解析为当前排名第一的免费模型(`source=alias`),并带上完整降级链;写成 `deepseek-v4.1-flash-free` 这类具体名字会得到 `source=requested`,上游报 `Model unavailable` 时不会换模型。
+
+**CC Switch 实际接入(2026-10-19):** codex 的 `proxy_route` 已切到 `ccgwopencode-1792100388084`,`is_current=1`,provider 的 `model` 已固化为 `auto`。用 Codex 自带 CLI 真机验证:
+
+```text
+codex exec --skip-git-repo-check --sandbox read-only -C D:\Temp\opencode "Reply with exactly: CODEX-FINAL-OK"
+→ CODEX-FINAL-OK (exit 0)
+→ ccgw.log: dialect=responses requestedModel=auto model=glm-5.3-flash-free modelSource=alias stream=true tools=11 bridge=gw...
+```
+
+`tools=11` 说明 Codex 的工具定义也走了网关的 MCP 桥,不是纯文本降级。
+
 
 ### Claude Desktop
 
@@ -286,6 +298,17 @@ wire_api = "responses"
 ### Claude Code 经 CC Switch(proxy 模式)
 
 CC Switch 处于 proxy 模式时会**接管** `~/.claude/settings.json`:写入 `ANTHROPIC_BASE_URL=http://127.0.0.1:15721`、`ANTHROPIC_AUTH_TOKEN=PROXY_MANAGED` 和三个 `claude-*` 别名。此时客户端配置的 `env` 优先级高于进程环境变量,手工改环境变量不会生效——要改模型映射请改 CC Switch 里的 provider。direct 模式则由 CC Switch 直接把 provider 的 `settings_config.env` 写进 `~/.claude/settings.json`,指向 `8317`。
+
+### 三端实测(2026-10-19,CC Switch 重启后)
+
+| 客户端 | 真实请求 | 结果 | ccgw 日志 |
+|---|---|---|---|
+| Claude Code CLI | `claude -p "Reply with exactly: CLAUDE-CLI-OK"` | `CLAUDE-CLI-OK` | `dialect=anthropic`,`slot:opus` → glm |
+| Claude Desktop 宿主路由 | `POST 15721/claude-desktop/v1/messages` + `ccs-` 令牌 | `DESK-RESTART-OK` | `slot:opus` → glm |
+| Codex CLI | `codex exec ... "Reply with exactly: CODEX-FINAL-OK"` | `CODEX-FINAL-OK` | `dialect=responses`,`auto` → glm,`tools=11` |
+
+三者的共同前置:CC Switch `15721` 在监听,`live-state.json` 的 `claude` / `claude-desktop` / `codex` 三条 `proxy_route` 都指向 ccgw provider。
+
 
 ### 一键导入深链
 
