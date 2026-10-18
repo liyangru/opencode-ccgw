@@ -1,6 +1,7 @@
 # runtime artifacts / machine-local secrets (never commit)
 ccgw.log
 *.log
+zero-window/tunnel.log*
 node_modules/
 ccswitch-links.txt
 .ccgw-state.json*

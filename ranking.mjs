@@ -107,7 +107,7 @@ export function loadRankConfig(file = DEFAULT_RANKS_FILE) {
       : DEFAULT_VISION_TRUSTED
     rankCache = { file, mtime: st.mtimeMs, order, slots, visionTrusted }
   } catch {
-    if (rankCache.file !== file || rankCache.order !== DEFAULT_ORDER || rankCache.slots !== DEFAULT_SLOTS) {
+    if (rankCache.file !== file || rankCache.order !== DEFAULT_ORDER || rankCache.slots !== DEFAULT_SLOTS || rankCache.visionTrusted !== DEFAULT_VISION_TRUSTED) {
       rankCache = { file, mtime: -1, order: DEFAULT_ORDER, slots: DEFAULT_SLOTS, visionTrusted: DEFAULT_VISION_TRUSTED }
     }
   }

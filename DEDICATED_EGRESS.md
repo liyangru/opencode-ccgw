@@ -27,10 +27,10 @@
 
 **推荐顺序：B → A → C。** 理由：B 不改任何网络栈、不装驱动、不碰路由表，出问题只需杀掉 `ssh` 进程；A 吞吐更好但引入 WireGuard 适配器与一条路由；C 只在 Always Free 开不出来时考虑。
 
-## 方案 B（推荐先做）
+## 方案 B（推荐先做，桥接器已内置）
 
 ```text
-ccgw ──CONNECT──> 127.0.0.1:41800 (gost, HTTP proxy)
+ccgw ──CONNECT──> 127.0.0.1:41800 (egress-ssh.mjs, HTTP CONNECT)
                         │
                         └──SOCKS5──> 127.0.0.1:1080 (ssh -D)
                                           │
@@ -39,17 +39,21 @@ ccgw ──CONNECT──> 127.0.0.1:41800 (gost, HTTP proxy)
 
 1. 在 Oracle Cloud 创建 Always Free 实例（`VM.Standard.A1.Flex`，1–4 OCPU / 6–24 GB，Ubuntu 24.04）。
 2. 安全列表只放行 SSH（22），**不要**对公网开放代理端口。
-3. 本机建立动态转发（只在本机监听）：
+3. 本机一条命令同时起 `ssh -D` 和 HTTP CONNECT 桥（无需 `gost`，无第三方二进制）：
 
    ```powershell
-   ssh -N -D 127.0.0.1:1080 -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes ubuntu@<vm-ip>
+   node .\ccgw\zero-window\egress-ssh.mjs --target ubuntu@<vm-ip> --listen-port 41800
    ```
 
-4. 本机用 `gost` 把 HTTP CONNECT 桥到 SOCKS5：
+   它会：`ssh -N -D 127.0.0.1:1080`（`ExitOnForwardFailure=yes`）→ 等 SOCKS 端口就绪 → 在 `127.0.0.1:41800` 提供 HTTP CONNECT。只接受回环客户端，默认只放行 `opencode.ai:443`。
+
+4. 先做一次连通性自检（不经过 ccgw，不消耗模型额度）：
 
    ```powershell
-   gost -L http://127.0.0.1:41800 -F socks5://127.0.0.1:1080
+   node .\ccgw\zero-window\egress-ssh.mjs --target ubuntu@<vm-ip> --check
    ```
+
+   期望输出 `{"event":"check","target":"opencode.ai:443","ok":true,"status":200}`。
 
 5. 让 ccgw 走它（与 WARP 同一个入口，不需要改代码）：
 
@@ -57,7 +61,13 @@ ccgw ──CONNECT──> 127.0.0.1:41800 (gost, HTTP proxy)
    $env:CCGW_EGRESS_UPSTREAM = "http://127.0.0.1:41800"
    ```
 
-6. 验证（必须走真实客户端，不能裸 curl）：用 Claude Code / Codex 发一次真实请求，确认 ccgw 日志 `served`，并确认出口 IP 是 VM 的 IP。
+   常驻时把这一行写进 `zero-window\gateway.vbs` 的 `CCGW_EGRESS_UPSTREAM`，再重启 `ccgw-gateway`。
+
+6. 验证（必须走真实客户端，不能裸 curl）：用 Claude Code / Codex 发一次真实请求，确认 ccgw 日志有 `modelSource=slot:*` 且成功，并确认出口 IP 是 VM 的 IP。
+
+7. 回退：停掉桥与 ssh，把 `CCGW_EGRESS_UPSTREAM` 改回 `http://127.0.0.1:41700`（WARP）。桥进程退出时不会改动整机路由。
+
+> 桥接器有离线回归：`node ccgw\test-egress-ssh.mjs`（9 条断言：ssh 参数、允许目标 200、载荷透传、非白名单 403、SOCKS 不可达 502）。
 
 ## 方案 A（吞吐更好）
 
@@ -79,6 +89,7 @@ ccgw ──CONNECT──> 127.0.0.1:41800 (gost, HTTP proxy)
 
 - 云账号（Oracle Always Free 或任意 VPS）与实例的 SSH 访问方式。
 - 期望的出口国家/地区（决定 VM 区域）。
-- 是否允许在本机安装 `gost`（单文件、仅本机监听）或 WireGuard 客户端。
+
+> 不再需要安装 `gost`：HTTP CONNECT → SOCKS5 桥已内置为 `zero-window/egress-ssh.mjs`，只依赖 Node 与系统 `ssh`。WireGuard 仅在需要更高吞吐时才考虑（方案 A）。
 
 在拿到这些之前，本机继续用 WARP；`ccgw-warp-rotate` 保持每 30 分钟轮换，`ccgw-netguard` 保持待命。

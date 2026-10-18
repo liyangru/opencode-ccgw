@@ -432,7 +432,7 @@ async function handleTurn({ dialect, body, req, res }) {
   const model = pick.model
   const supportsImage = (id) => !!models.list.find(m=>m.id===id)?.input?.includes('image')
   if(canon.files?.length && !supportsImage(model)) {
-    return json(res,400,{error:{type:'invalid_request_error',message:'所选模型不支持图片，请选择支持图片的模型，如 GLM 或 DeepSeek。'}})
+    return json(res,400,{error:{type:'invalid_request_error',message:'所选模型不支持图片，请选择支持图片的模型：glm-5.3-flash-free / nemotron-3.5-super-vl-free / mimo-v2.6-flash-free。'}})
   }
   const inputTokens = countTokensApprox(canon)
 
@@ -503,7 +503,20 @@ async function handleTurn({ dialect, body, req, res }) {
         if (ac.signal.aborted) throw new Error("Client disconnected")
         const a = pickAccount(tried, activeModel)
         if (!a) {
-          if (modelQueue.length > 1) break // exhausted every account for this model; try the next one
+          // No account is usable for this model: either every account was
+          // already tried for it, or all of them are cooling for it. If the
+          // chain has another model, advance to it (per-model cooldowns differ);
+          // otherwise fail. Never break out with neither error nor progress --
+          // that spins the outer loop forever.
+          if (modelQueue.length > 1) {
+            const next = modelQueue[1]
+            logLine({ reqId, phase: "model-fallback", account: null, from: activeModel, to: next, msg: "no account available for this model, trying next ranked model" })
+            activeModel = next
+            modelQueue.shift()
+            tried.clear()
+            attempt = -1
+            continue
+          }
           error = coolingError(activeModel)
           break
         }

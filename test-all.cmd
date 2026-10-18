@@ -30,5 +30,9 @@ echo === test-model-fallback ^(plain script^) ===
 node test-model-fallback.mjs
 if errorlevel 1 set FAIL=1
 echo.
+echo === test-egress-ssh ^(plain script^) ===
+node test-egress-ssh.mjs
+if errorlevel 1 set FAIL=1
+echo.
 if "!FAIL!"=="1" (echo OFFLINE SUITE: FAILED) else (echo OFFLINE SUITE: ALL GREEN)
 exit /b !FAIL!

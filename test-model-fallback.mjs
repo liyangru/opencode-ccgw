@@ -24,6 +24,7 @@ function simulate(scenario, opts = {}) {
     "beam-free": scenario[2],
   }
   const accountNames = ["acct1", "acct2"]
+  const cooling = new Set(opts.cooling || [])
 
   if (modelQueue.length === 0) return { error: "empty-chain", attempts }
   if (scenario.every((o) => o === "fail-upstream")) {
@@ -32,6 +33,12 @@ function simulate(scenario, opts = {}) {
   for (let mi = 0; mi < modelQueue.length; mi++) {
     const activeModel = modelQueue[mi]
     let broke = false
+    // pickAccount() returns null when every account is cooling for this model.
+    if (cooling.has(activeModel)) {
+      attempts.push({ model: activeModel, account: null, outcome: "no-account" })
+      if (mi + 1 < modelQueue.length) { broke = true; continue }
+      return { error: "cooling", attempts }
+    }
     // inner loop over accounts
     for (let attempt = 0; attempt < accountNames.length; attempt++) {
       const outcome = outcomes[activeModel]
@@ -84,4 +91,12 @@ assert.equal(r.attempts.length, 1, "403 fails on the first account, no rotation"
 const chain = fallbackChain({ ranked, model: "beam-free", source: "top-free", imageOk, hasFiles: true })
 assert.deepEqual(chain, [], "an image request starting on a text-only model has no safe fallback")
 
-console.log("  model-fallback control flow: 5 scenarios ok (drop-on-upstream, terminal 429/403, chain exhaustion, image-safe chain)")
+// Regression: pickAccount() returning null (all accounts cooling) used to break
+// the inner loop without setting an error or advancing the model, so the outer
+// loop spun forever. It must advance the model, then terminate.
+r = simulate(["ok", "ok", "ok"], { model: "glm-5.3-flash-free", source: "slot:opus", cooling: ["glm-5.3-flash-free"] })
+assert.equal(r.model, "nemotron-3.5-super-vl-free", "all-cooling on the head model advances instead of spinning")
+r = simulate(["ok", "ok", "ok"], { model: "glm-5.3-flash-free", source: "slot:opus", cooling: ranked })
+assert.equal(r.error, "cooling", "all models cooling terminates with an error")
+
+console.log("  model-fallback control flow: 7 scenarios ok (drop-on-upstream, terminal 429/403, chain exhaustion, image-safe chain, all-cooling advance/terminate)")

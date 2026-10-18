@@ -277,6 +277,8 @@ wire_api = "responses"
 - `app_type = claude`(Claude Code)的 provider 同理:`ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` 写别名,不要写死免费模型名。
 - CC Switch 必须保持运行;它的本地代理(15721)停掉时,两个客户端都会 `ECONNREFUSED`。
 
+**GUI 级实测(2026-10-19):** Code 标签页能正常渲染,并从 `%LOCALAPPDATA%\Claude-3p\configLibrary\<id>.json` 读到 `inferenceGatewayBaseUrl=http://127.0.0.1:15721/claude-desktop`。桌面端宿主回环在 `04:36:45` 发出 `claude-fable-5`,ccgw 日志记录 `modelSource=slot:opus → glm-5.3-flash-free`、`status:200 event-stream`,`main.log` 记 `Turn succeeded`。同一时刻界面可能显示 `Can't reach 127.0.0.1:15721`:这是桌面端自己的健康探针(一次真实推理请求,约 10 秒超时)在免费模型冷启动时超时,`main.log` 落 `not_testable`(不是 `unreachable`),成功一轮后自动清除。**判据以 ccgw 日志和 `cli_api_route_observed` 为准,不要以横幅为准**;CC Switch 的 `/claude-desktop/health` 是 404,但 `/claude-desktop/v1/messages` 带 `ccs-` 令牌返回 200。
+
 ### Claude Code 经 CC Switch(proxy 模式)
 
 CC Switch 处于 proxy 模式时会**接管** `~/.claude/settings.json`:写入 `ANTHROPIC_BASE_URL=http://127.0.0.1:15721`、`ANTHROPIC_AUTH_TOKEN=PROXY_MANAGED` 和三个 `claude-*` 别名。此时客户端配置的 `env` 优先级高于进程环境变量,手工改环境变量不会生效——要改模型映射请改 CC Switch 里的 provider。direct 模式则由 CC Switch 直接把 provider 的 `settings_config.env` 写进 `~/.claude/settings.json`,指向 `8317`。
@@ -295,12 +297,20 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 
 网关可同时给多台设备/朋友使用,他们不需要安装任何东西——在任意支持自定义 API 地址的工具(或纯 curl / SDK)里填 **地址 + 口令** 即可。所有请求使用同一账户池和有界重试规则,分享不增加免费额度。
 
-- 公网入口 = 两条免费隧道并存(都转发本地 `http://127.0.0.1:8317`,同一口令):
+- 公网入口 = 两条免费隧道，**默认都不常驻**（都转发本地 `http://127.0.0.1:8317`，同一口令）。需要分享时再按需启动，用完即停：
 
   | 隧道 | 地址 | 说明 |
   |---|---|---|
   | **ngrok 固定域名**(推荐发给朋友) | **`https://bronco-rewrap-january.ngrok-free.dev`** | 永久不变;计划任务 `ccgw-tunnel-ngrok`(**现默认关闭**——公网转发会把所有外部请求的指纹记到本机出口;分享时才开:`Enable-ScheduledTask ccgw-tunnel-ngrok` 后 `Start-ScheduledTask ccgw-tunnel-ngrok`);免费额度 2 万请求/月、1 GB 流量/月 |
-  | cloudflared 快速隧道(备用) | `zero-window\tunnel.log` 里的 `https://<随机名>.trycloudflare.com` | 免账号但重启后会换址;计划任务 `ccgw-tunnel` |
+  | cloudflared 快速隧道(备用) | `zero-window\tunnel.ps1 -Action start` 输出的 `https://<随机名>.trycloudflare.com` | 免账号但每次启动换址;计划任务 `ccgw-tunnel` **已停用**(2026-10-19:旧快速隧道被上游回收后 `cloudflared` 只会无限重试 `Tunnel not found`，362 次错误/不停机)。用 `tunnel.ps1 start` 现取新址，`stop` 立即收回 |
+
+  cloudflared 备用隧道的按需用法（脚本自带公网鉴权自检：匿名必须 401、带口令必须 200）：
+
+  ```powershell
+  .\ccgw\zero-window\tunnel.ps1 -Action start   # 新建隧道并打印 url，同时验证 401/200
+  .\ccgw\zero-window\tunnel.ps1 -Action probe   # 复验当前 url
+  .\ccgw\zero-window\tunnel.ps1 -Action stop    # 收回公网入口
+  ```
 
   ngrok 固定域名的等价命令(运行器是 `zero-window\tunnel-ngrok.vbs`,机器本地生成、不入库):
 
