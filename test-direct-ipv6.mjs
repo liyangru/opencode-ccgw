@@ -70,3 +70,28 @@ test('connection timeout ends at TLS readiness, not at the first model token',as
   const response=Readable.from([Buffer.from('late headers accepted')]);Object.assign(response,{rawHeaders:[],headers:{},statusCode:200,statusMessage:'OK'});deliver(response)
   assert.equal(await (await pending).text(),'late headers accepted')
 })
+test('missing IPv6 route falls back once to IPv4 before any provider request is sent',async()=>{
+  const {directFetch}=await import('./native-ipv6/direct-fetch.mjs')
+  const attempts=[]
+  const r=await directFetch('https://opencode.ai/inference/test',{method:'POST',body:'original-provider-body'},(opts,cb)=>{
+    attempts.push(opts.family)
+    const out=new EventEmitter();out.destroy=()=>{};out.end=body=>queueMicrotask(()=>{
+      assert.equal(body.toString(),'original-provider-body')
+      if(opts.family===6){out.emit('error',Object.assign(new Error('No IPv6 route'),{code:'ENETUNREACH'}));return}
+      const res=Readable.from([Buffer.from('IPV4_OK')]);Object.assign(res,{rawHeaders:[],headers:{},statusCode:200,statusMessage:'OK'});cb(res)
+    });return out
+  })
+  assert.equal(await r.text(),'IPV4_OK');assert.deepEqual(attempts,[6,4])
+})
+test('real provider 403 and 429 responses never cause a family retry',async()=>{
+  const {directFetch}=await import('./native-ipv6/direct-fetch.mjs')
+  for(const status of [403,429]){
+    const attempts=[]
+    const r=await directFetch('https://opencode.ai/inference/test',{},(opts,cb)=>{
+      attempts.push(opts.family);const out=new EventEmitter();out.destroy=()=>{};out.end=()=>queueMicrotask(()=>{
+        const res=Readable.from([Buffer.from('upstream-denied')]);Object.assign(res,{rawHeaders:[],headers:{},statusCode:status,statusMessage:'Denied'});cb(res)
+      });return out
+    })
+    assert.equal(r.status,status);assert.equal(await r.text(),'upstream-denied');assert.deepEqual(attempts,[6])
+  }
+})

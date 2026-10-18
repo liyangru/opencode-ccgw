@@ -27,7 +27,7 @@ const ranked = rankFree(catalog, cfg.order)
 assert.deepEqual(ranked, [...DEFAULT_ORDER, "brand-new-free", "ghost-free"], "curated order first, unknown free models appended, paid excluded")
 
 // top-5 should not be text-only: at least image and video providers up high
-const inputOf = (id) => ({ "deepseek-v4.1-flash-free": ["text", "image"], "glm-5.3-flash-free": ["text", "image", "video", "pdf"], "nemotron-3.5-super-vl-free": ["text", "image"], "beam-free": ["text"], "longcat-2.5-preview-free": ["text", "image"] }[id] || ["text"])
+const inputOf = (id) => ({ "deepseek-v4.1-flash-free": ["text", "image"], "glm-5.3-flash-free": ["text", "image", "video", "pdf"], "space-bunny-free": ["text", "image", "video"], "mimo-v2.6-flash-free": ["text", "image", "audio", "video"], "nemotron-3.5-super-vl-free": ["text", "image"], "beam-free": ["text"], "longcat-2.5-preview-free": ["text", "image"] }[id] || ["text"])
 const top5 = ranked.slice(0, 5).flatMap((id) => inputOf(id))
 assert.ok(top5.includes("image"), "an image-capable model ranks in the top 5")
 assert.ok(top5.includes("video"), "a video-capable model ranks in the top 5")
@@ -49,10 +49,10 @@ const base = { ids, freeSet, ranked, slots, pin: "", fallback: "deepseek-v4.1-fl
 
 assert.deepEqual(pickModel({ ...base, requested: "glm-5.3-flash-free" }), { model: "glm-5.3-flash-free", source: "requested" })
 assert.deepEqual(pickModel({ ...base, requested: "opencode/glm-5.3-flash-free" }), { model: "glm-5.3-flash-free", source: "requested" })
-assert.deepEqual(pickModel({ ...base, requested: "claude-haiku-4-5-20251001" }), { model: "glm-5.3-flash-free", source: "slot:haiku" })
-assert.deepEqual(pickModel({ ...base, requested: "claude-sonnet-4-5-20250929" }), { model: "glm-5.3-flash-free", source: "slot:sonnet" })
+assert.deepEqual(pickModel({ ...base, requested: "claude-haiku-4-5-20251001" }), { model: "space-bunny-free", source: "slot:haiku" })
+assert.deepEqual(pickModel({ ...base, requested: "claude-sonnet-4-5-20250929" }), { model: "longcat-2.5-preview-free", source: "slot:sonnet" })
 assert.deepEqual(pickModel({ ...base, requested: "claude-opus-5-5" }), { model: "deepseek-v4.1-flash-free", source: "slot:opus" })
-assert.deepEqual(pickModel({ ...base, requested: "vision" }), { model: "glm-5.3-flash-free", source: "slot:vision" })
+assert.deepEqual(pickModel({ ...base, requested: "vision" }), { model: "nemotron-3.5-super-vl-free", source: "slot:vision" })
 assert.deepEqual(pickModel({ ...base, requested: "gpt-6-astra" }), { model: "deepseek-v4.1-flash-free", source: "not-free" })
 assert.deepEqual(pickModel({ ...base, requested: "totally-made-up" }), { model: "deepseek-v4.1-flash-free", source: "top-free" })
 assert.deepEqual(pickModel({ ...base, requested: "" }), { model: "deepseek-v4.1-flash-free", source: "top-free" })
@@ -64,7 +64,7 @@ assert.deepEqual(pickModel({ ...base, pin: "nonexistent", requested: "totally-ma
 // slot pointing at a model that is not free -> skipped, top-ranked used
 assert.deepEqual(pickModel({ ...base, slots: { ...slots, haiku: "gone-model-free" }, requested: "claude-haiku-4-5" }), { model: "deepseek-v4.1-flash-free", source: "top-free" })
 // no free models known at all
-assert.deepEqual(pickModel({ ...base, ranked: [], requested: "claude-sonnet-5-5" }), { model: "glm-5.3-flash-free", source: "slot:sonnet" })
+assert.deepEqual(pickModel({ ...base, ranked: [], requested: "claude-sonnet-5-5" }), { model: "longcat-2.5-preview-free", source: "slot:sonnet" })
 assert.deepEqual(pickModel({ ...base, ranked: [], slots: {}, requested: "claude-sonnet-5-5" }), { model: "claude-sonnet-5-5", source: "passthrough" })
 assert.deepEqual(pickModel({ ...base, ranked: [], slots: {}, requested: "nope" }), { model: "deepseek-v4.1-flash-free", source: "static" })
 

@@ -32,26 +32,26 @@ export const AUTO_ALIASES = new Set(["auto", "best", "best-free", "ccgw-auto", "
 // Built-in safety net; keep in sync with model-ranks.json (the file wins).
 export const DEFAULT_ORDER = [
   "deepseek-v4.1-flash-free",
-  "glm-5.3-flash-free",
-  "nemotron-3.5-super-vl-free",
-  "beam-free",
-  "longcat-2.5-preview-free",
   "space-bunny-free",
-  "mimo-v2.6-flash-free",
+  "longcat-2.5-preview-free",
+  "beam-free",
+  "nemotron-3.5-super-vl-free",
   "nemotron-3-ultra-free",
-  "nemotron-3.5-lightning-free",
+  "mimo-v2.6-flash-free",
   "big-pickle",
+  "glm-5.3-flash-free",
+  "nemotron-3.5-lightning-free",
 ]
 
 // Slot mapping: haiku = small/fast + background, sonnet = workhorse,
-// opus = max power, vision = image/video/PDF tasks. haiku points at glm:
-// measured 2-3s per request, while nemotron-3.5-lightning (fast by name)
-// actually took 13s-180s in the same test harness.
+// opus = max power, vision = vision-capable. Measured on 2026-10-18:
+// space-bunny ~1.2s (fastest), longcat ~2.5-3.4s, while glm-5.3-flash was
+// returning "Endpoint is unavailable" upstream, so no slot may point at it.
 export const DEFAULT_SLOTS = {
   opus: "deepseek-v4.1-flash-free",
-  sonnet: "glm-5.3-flash-free",
-  haiku: "glm-5.3-flash-free",
-  vision: "glm-5.3-flash-free",
+  sonnet: "longcat-2.5-preview-free",
+  haiku: "space-bunny-free",
+  vision: "nemotron-3.5-super-vl-free",
 }
 
 // ---------------------------------------------------------------------------

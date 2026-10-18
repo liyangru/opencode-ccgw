@@ -1,3 +1,5 @@
+> 本机当前用途（2026-10-18）：ccgw 用于 Claude/Codex；OpenCode 桌面端保持官方原生连接，不接入本机 ccgw。详见 [客户端分离记录](CLIENT_BOUNDARIES.md)。
+
 # ccgw — OpenCode 本机转接网关
 
 把 [OpenCode](https://opencode.ai)(桌面版后台服务,或无头 `opencode-cli serve`)变成一个 **Anthropic Messages / OpenAI Chat Completions / OpenAI Responses 三协议兼容**的本机 API 网关。
@@ -120,20 +122,22 @@ Stop-ScheduledTask ccgw-gateway -ErrorAction SilentlyContinue; Start-ScheduledTa
 
 网关仅从账户实例实时目录的 **`providerID = opencode` 原生 provider** 中识别已启用的免费模型——判据取自上游元数据本身(`cost = 0/0`,或名字带 `-free` 后缀;`big-pickle` 这类无后缀的免费模型也能自动认出)。本次原生免费目录为 10 个模型;其他本地 provider（包括指回网关的 provider）不参与发现与路由。免费列表按仓库根目录的 `model-ranks.json` 从强到弱排序,新出现的免费模型自动补到列表尾部(无需改代码;该文件热生效,约一分钟内刷新)。目录条目和免费标记不保证当前账户能成功调用。
 
-**默认排名(2026-10-17:好 → 差;输入列为上游目录能力,当前网关桥接仅转发文本与工具调用):**
+**默认排名(2026-10-18 逐模型实测修订:好 → 差;输入列为上游目录能力):**
 
-| # | 模型 | 上游目录输入能力 | 上游说明 / 既有观测 |
+| # | 模型 | 上游目录输入能力 | 上游说明 / 实测(2026-10-18,WARP 出口) |
 |---|---|---|---|
-| 1 | `deepseek-v4.1-flash-free` | 文本 + 图片 | 综合首选,编码/代理任务最稳;能看图(截图/OCR);200k 上下文 |
-| 2 | `glm-5.3-flash-free` | 文本 + 图片 + **视频** + **PDF** | 多模态首选:唯一能读 **PDF**;图片/视频理解;200k 上下文;实测**响应最快**(2–3 秒) |
-| 3 | `nemotron-3.5-super-vl-free` | 文本 + 图片 | 最新视觉语言模型(2026-10-15);**1M 上下文** |
-| 4 | `beam-free` | 文本 | 501B 大模型(23B 激活):复杂推理/深度思考;1M 上下文 |
-| 5 | `longcat-2.5-preview-free` | 文本 + 图片 | 1M 上下文 + 图像理解:长文档/大代码库通读 |
-| 6 | `space-bunny-free` | 文本 + 图片 + **视频** | 匿名预览模型:1M 上下文、**54 万输出上限**(超长产出);稳定性不如正式模型 |
-| 7 | `mimo-v2.6-flash-free` | 文本 + 图片 + **音频** + **视频** | 唯一支持**音频**;闪速系列;200k 上下文 |
-| 8 | `nemotron-3-ultra-free` | 文本 | 550B 参数;1M 上下文(较老,2026-06) |
-| 9 | `nemotron-3.5-lightning-free` | 文本 | 速度命名款,但实测反而**最慢**(单请求 13 秒~3 分钟,可超时):别当快模型用;262k 上下文 |
-| 10 | `big-pickle` | 文本 | 经典隐形免费模型;200k 上下文 |
+| 1 | `deepseek-v4.1-flash-free` | 文本 + 图片 | 综合首选,编码/代理任务最稳;能看图;200k 上下文;连续压测会撞 429 |
+| 2 | `space-bunny-free` | 文本 + 图片 + **视频** | **实测最快**(~1.2 秒);工具调用正确;1M 上下文;限流较敏感 |
+| 3 | `longcat-2.5-preview-free` | 文本 + 图片 | 1M 上下文 + 图像理解;工具调用正确;~2.5–3.4 秒 |
+| 4 | `beam-free` | 文本 | 复杂推理/深度思考;工具调用正确;~0.9–3.4 秒波动 |
+| 5 | `nemotron-3-ultra-free` | 文本 | 550B;1M 上下文;工具调用正确 |
+| 6 | `nemotron-3.5-super-vl-free` | 文本 + 图片 | 视觉语言模型;**1M 上下文** |
+| 7 | `mimo-v2.6-flash-free` | 文本 + 图片 + **音频** + **视频** | 唯一支持**音频**;工具调用正确但较慢(~12 秒) |
+| 8 | `big-pickle` | 文本 | 经典隐形免费模型;200k 上下文 |
+| 9 | `glm-5.3-flash-free` | 文本 + 图片 + **视频** + **PDF** | 目录里唯一标 PDF;但 **2026-10-18 实测上游持续 `Endpoint is unavailable`**,降级保留 |
+| 10 | `nemotron-3.5-lightning-free` | 文本 | 速度命名款,但实测反而**最慢**(可超时):别当快模型用;262k 上下文 |
+
+> 同日实测不可用并已移出排名:`muse-spark-1.3-contributor-free`、`cat-jam-free`(`Model unavailable`)、`ll-alpha-free`(`deprecated`)。它们仍会被自动发现追加在末尾,但不应被显式指定。
 
 表中"输入能力"来自上游目录元数据。本桥接当前已转发**内嵌图片**(PNG/JPEG/WebP/GIF,见「已知限制」);视频、PDF、音频与远程图片网址仍未接入,发来会得到 400。不能把文本回答当作模型已读取附件。表中的速度为既有观测,不承诺当前延迟。
 
@@ -142,9 +146,11 @@ Stop-ScheduledTask ccgw-gateway -ErrorAction SilentlyContinue; Start-ScheduledTa
 | 槽位 | 请求名匹配 | 当前指向 | 含义 |
 |---|---|---|---|
 | `opus` | 含 `opus` / `fable` | #1 `deepseek-v4.1-flash-free` | 最强档 → 排名第一 |
-| `sonnet` | 含 `sonnet` | #2 `glm-5.3-flash-free` | 日常主力 → 排名第二 |
-| `haiku` | 含 `haiku` | #2 `glm-5.3-flash-free` | 小/快模型 + 后台任务(标题、摘要)→ 实测最快(2–3 秒) |
-| `vision` | 恰为 `vision` / `image` / `vl` | #2 `glm-5.3-flash-free` | 视觉入口别名 → 唯一能读 PDF 的多模态模型(桥接当前转发内嵌图片) |
+| `sonnet` | 含 `sonnet` | #3 `longcat-2.5-preview-free` | 日常主力 → 1M 上下文、工具调用稳定 |
+| `haiku` | 含 `haiku` | #2 `space-bunny-free` | 小/快模型 + 后台任务(标题、摘要)→ **实测最快 ~1.2 秒** |
+| `vision` | 恰为 `vision` / `image` / `vl` | #6 `nemotron-3.5-super-vl-free` | 视觉入口 → 支持图片、1M 上下文(不再用已不可用的 glm) |
+
+> 2026-10-18 修订:`sonnet` / `haiku` / `vision` 原先全部指向 `glm-5.3-flash-free`,该模型当日在上游持续不可用,三个槽位因此同时失效。现已分别改为长期可用的模型。
 
 槽位目标必须是免费模型;指向的模型当前不可用时自动落回排名第一。改排名或槽位都只改 `model-ranks.json`(热生效)。
 
@@ -155,8 +161,8 @@ export ANTHROPIC_BASE_URL="https://bronco-rewrap-january.ngrok-free.dev"   # 本
 export ANTHROPIC_AUTH_TOKEN="<口令>"                                       # 本机直连可填任意非空值
 export ANTHROPIC_MODEL="deepseek-v4.1-flash-free"                  # 默认会话 → 排名 #1
 export ANTHROPIC_DEFAULT_OPUS_MODEL="deepseek-v4.1-flash-free"     # opus 槽 → 排名 #1(最强)
-export ANTHROPIC_DEFAULT_SONNET_MODEL="glm-5.3-flash-free"         # sonnet 槽 → 排名 #2
-export ANTHROPIC_DEFAULT_HAIKU_MODEL="glm-5.3-flash-free"          # haiku 槽 + 后台任务 → 实测最快
+export ANTHROPIC_DEFAULT_SONNET_MODEL="longcat-2.5-preview-free"   # sonnet 槽 → 排名 #3
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="space-bunny-free"             # haiku 槽 + 后台任务 → 实测最快
 export CLAUDE_CODE_SUBAGENT_MODEL="deepseek-v4.1-flash-free"       # 子代理 → 排名 #1
 export API_TIMEOUT_MS=600000                                       # 大模型首字较慢,放宽超时
 ```
@@ -166,7 +172,7 @@ export API_TIMEOUT_MS=600000                                       # 大模型�
 - **自动选优**:请求名只要是免费模型就直接用;**槽位名**按上表对齐;**未知 / 付费目录 / 占位名**(如 `claude-sonnet-5-5`、空)落到排名第一——不会再出现"付费名透传 → 免费号必然报错 → 账号误冷却"的连锁;别名 `auto` / `best` / `best-free` / `ccgw-auto` / `free-auto` 等价于"用第一"。
 - `GET /v1/models` 只列原生 provider 的**免费模型**(按排名顺序),每条带 `ccgw_rank`(排名)与 `ccgw_input`(桥接输入能力,与 `/health.freeRanked` 的 `bridgeInput` 同源),客户端模型选择器不混入其他 provider 或付费目录。
 - `GET /health` 的 `freeRanked` = 当前完整排名(每条含 `rank` / `id` / `name` / `input` / `bridgeInput` / `context`;`input` 保留上游目录能力,`bridgeInput` 表示当前桥接输入),另有 `modelSlots`(槽位映射)/ `defaultModel` / `modelPin`;每次请求日志带 `model` + `modelSource`(`requested` / `slot:<槽位>` / `alias` / `not-free` / `top-free` / `default` / `static`)。
-- 想固定模型:`CCGW_MODEL=glm-5.3-flash-free`(须在免费列表内;它只影响"兜底用哪个",槽位匹配优先);自检:`node test-ranking.mjs`。
+- 想固定模型:`CCGW_MODEL=deepseek-v4.1-flash-free`(须在免费列表内;它只影响"兜底用哪个",槽位匹配优先);自检:`node test-ranking.mjs`。
 
 ## 可选网络守卫与手动备用出口
 
@@ -366,6 +372,14 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 ## 2026-10-18：IPv4 准入拒绝的本机修复
 
 同账户官方客户端对照(2026-10-18 04:20)显示 IPv4 返回 FreeTierError、IPv6 正常;同日 07:33 同一家宽 IPv4 用官方客户端已恢复正常——该拒绝是偶发软限流,不是永久封禁,遇到先重试。现有 8317 增加仅限本机、带认证、仅允许 opencode.ai:443 的透明 CONNECT，四个专用后台进程优先 IPv6；不修改 TLS/客户端身份，不开启 VPN。原账号、会话和工具权限保留。DeepSeek、Claude Messages、Codex Responses、官方桌面服务经 ccgw 及外部工具往返均已真实成功。启动配置已持久保存，凭据只在进程内解密。出口运行状态见 `/health.egress`（`preferredFamily:6`，失败自动回退 IPv4）。详见 [修复与验证记录](RATE_LIMIT_RETRY.md)。
+
+## 2026-10-18：模型可用性复核与槽位调整
+
+- 在 WARP 出口下逐模型实测 13 个免费模型：8 个可用且**工具调用正确**；`glm-5.3-flash-free` 持续 `Endpoint is unavailable`；`muse-spark` / `cat-jam` `Model unavailable`；`ll-alpha-free` `deprecated`。`nemotron-3.5-lightning` 单请求可超时。
+- `sonnet` / `haiku` / `vision` 原本都指向 glm，同日一并失效；现已改为 `longcat-2.5-preview-free` / `space-bunny-free` / `nemotron-3.5-super-vl-free`，`opus` 保持 `deepseek-v4.1-flash-free`。
+- 初次探测时所有模型都报 `Gateway session plugin is not active`：网关 scratch（`D:\Temp\ccgw-scratch`）下的 `ccgw-output-budget` 插件目录被清理器移除，网关只在启动时安装一次。已重装并重启网关，两个实例均确认 `ccgw-output-budget-v1 status=active`。**临时清理器删掉 scratch 后，必须重启网关，否则所有请求都会 503。**
+- 实测 403 是**出口维度**的软拒绝：家宽 IPv6 两个账户全拒，切 WARP 后 deepseek 立即恢复；但 WARP 下 glm 仍不可用（模型维度），两者要分开判断。
+- `node test-ranking.mjs` 与 `test-all.cmd` 在改槽位后仍需全绿；`test-all.cmd` 不调用上游。
 
 ## License
 

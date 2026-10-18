@@ -104,7 +104,7 @@ while ($true) {
   try {
     # 自愈看门狗:ccgw-vpngate 只应由 vpngate 后端使用;其余情况下它的存在
     # 都是残留(测试/手动遗留),会把整台机器静默留在(可能被上游标记的)公共出口上
-    if ($Backend -ne "vpngate") {
+    if ($Backend -ne "vpngate" -and $Backend -ne "none") {
       $vgc = Get-VpnConnection -Name "ccgw-vpngate" -ErrorAction SilentlyContinue
       if ($vgc -and $vgc.ConnectionStatus -eq "Connected") {
         LG "stale egress cleanup: disconnecting leftover ccgw-vpngate ($($vgc.ServerAddress))"
@@ -124,7 +124,7 @@ while ($true) {
         # 没有可切的备用出口:每个限流周期只提示一次,不做任何动作
         if (-not $alarmSent) {
           $alarmSent = $true
-          LG "QUOTA EXHAUSTED (all accounts rate-limited) - no alternate egress configured (install WARP or NordVPN, or set -Backend explicitly; see README)"
+          LG "QUOTA EXHAUSTED (all accounts rate-limited) - monitor only; system network unchanged"
         }
       } elseif (-not $switched) {
         $st = Egress-Status

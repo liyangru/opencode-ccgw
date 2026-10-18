@@ -5,7 +5,18 @@ import zlib from 'node:zlib'
 // No local proxy: retain the original URL, TLS hostname and request identity.
 // Scoped caller selects only official inference requests, never other providers.
 export async function directFetch(input,init,request=https.request){
-  const req=new Request(input,init),url=new URL(req.url)
+  const original=new Request(input,init)
+  try{return await fetchFamily(original.clone(),request,6)}
+  catch(error){
+    original.signal.throwIfAborted()
+    // Only DNS/TCP/TLS-connect failures can switch families. Provider responses
+    // (including 403/429) and failures after sending a request are never replayed.
+    if(!['ENOENT','ENOTFOUND','EAI_AGAIN','ENETUNREACH','EHOSTUNREACH','ECONNREFUSED','CCGW_CONNECT_TIMEOUT'].includes(error?.code))throw error
+    return await fetchFamily(original,request,4)
+  }
+}
+async function fetchFamily(input,request,family){
+  const req=new Request(input),url=new URL(req.url)
   if(url.protocol!=='https:'||url.hostname!=='opencode.ai'||url.port)throw Error('Native IPv6 transport is restricted to official OpenCode HTTPS')
   req.signal.throwIfAborted()
   const body=req.body?Buffer.from(await req.arrayBuffer()):undefined
@@ -16,7 +27,7 @@ export async function directFetch(input,init,request=https.request){
     const fail=e=>{if(!settled){settled=true;reject(e)}}
     const cleanup=()=>req.signal.removeEventListener('abort',abort)
     const abort=()=>{const e=req.signal.reason||new DOMException('Aborted','AbortError');out?.destroy(e);stream?.destroy(e);try{bodyController?.error(e)}catch{}reader?.cancel(e).catch(()=>{});cleanup();fail(e)}
-    out=request({protocol:'https:',hostname:url.hostname,servername:url.hostname,port:443,family:6,method:req.method,path:url.pathname+url.search,headers},res=>{
+    out=request({protocol:'https:',hostname:url.hostname,servername:url.hostname,port:443,family,method:req.method,path:url.pathname+url.search,headers},res=>{
       response=res
       clearTimeout(connectTimer)
       const resultHeaders=new Headers()
@@ -42,7 +53,7 @@ export async function directFetch(input,init,request=https.request){
         settled=true;resolve(result)
       }catch(e){out.destroy();fail(e)}
     })
-    connectTimer=setTimeout(()=>out.destroy(new Error('OpenCode IPv6 connection timed out')),15000)
+    connectTimer=setTimeout(()=>out.destroy(Object.assign(new Error('OpenCode connection timed out'),{code:'CCGW_CONNECT_TIMEOUT'})),15000)
     out.once('error',e=>{clearTimeout(connectTimer);fail(e)})
     out.once('socket',socket=>{
       if(!socket.connecting&&socket.encrypted)clearTimeout(connectTimer)

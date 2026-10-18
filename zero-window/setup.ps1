@@ -17,11 +17,15 @@ param(
   [int]$ServePort = 4096,
   [int]$GatewayPort = 8317,
   [string]$Model = "deepseek-v4.1-flash-free",
-  [string]$CliPath = ""
+  [string]$CliPath = "",
+  [switch]$EnableSystemVpn
 )
 $ErrorActionPreference = "Stop"
 $zw = $PSScriptRoot
 $root = Split-Path $zw -Parent
+if (-not (Test-Path (Join-Path $zw "net-guard.backend"))) {
+  Set-Content -LiteralPath (Join-Path $zw "net-guard.backend") -Value "none" -Encoding Ascii
+}
 
 # --- locate node
 $node = (Get-Command node -ErrorAction SilentlyContinue).Source
@@ -52,8 +56,24 @@ $pw = -join ($chars | Get-Random -Count 40 | ForEach-Object { [char]$_ })
 Set-Content -Path (Join-Path $zw "headless-service.json") -Value ("{""password"":""$pw""}") -Encoding Ascii
 
 # --- hidden launchers (VBS, UTF-16, wait-on-child so the task lives as long as the process)
+$headlessHome = Join-Path $zw "accounts\acct1\home"
+$headlessConfigDir = Join-Path $headlessHome ".config\opencode"
+New-Item -ItemType Directory -Force $headlessConfigDir | Out-Null
+if (-not (Test-Path (Join-Path $headlessConfigDir "opencode.json"))) {
+  [IO.File]::WriteAllText((Join-Path $headlessConfigDir "opencode.json"), '{"model":"opencode/deepseek-v4.1-flash-free","plugins":[],"providers":{}}', (New-Object Text.UTF8Encoding($false)))
+}
 $serve = @"
 Set sh = CreateObject("WScript.Shell")
+sh.Environment("PROCESS")("USERPROFILE") = "$headlessHome"
+sh.Environment("PROCESS")("HOME") = "$headlessHome"
+sh.Environment("PROCESS")("APPDATA") = "$headlessHome\AppData\Roaming"
+sh.Environment("PROCESS")("LOCALAPPDATA") = "$headlessHome\AppData\Local"
+sh.Environment("PROCESS")("XDG_CONFIG_HOME") = "$headlessHome\.config"
+sh.Environment("PROCESS")("XDG_DATA_HOME") = "$headlessHome\.local\share"
+sh.Environment("PROCESS")("XDG_STATE_HOME") = "$headlessHome\.local\state"
+sh.Environment("PROCESS")("XDG_CACHE_HOME") = "$headlessHome\.cache"
+sh.Environment("PROCESS")("OPENCODE_CONFIG_DIR") = "$headlessConfigDir"
+sh.Environment("PROCESS")("CCGW_PROFILE_HOME") = "$headlessHome"
 sh.Environment("PROCESS")("OPENCODE_SERVER_PASSWORD") = "$pw"
 rc = sh.Run("""$CliPath"" serve --hostname 127.0.0.1 --port $ServePort", 0, True)
 WScript.Quit rc
@@ -114,7 +134,7 @@ if ((Test-Path $nordExe) -or (Test-Path $warpExe)) {
 # drops (the backup egress the free tier accepts). Harmless when WARP is absent:
 # the script logs one line and exits.
 $warpCli = "C:\Program Files\Cloudflare\Cloudflare WARP\warp-cli.exe"
-if (Test-Path $warpCli) {
+if ((Test-Path $warpCli) -and $EnableSystemVpn) {
   try {
     $wgVbs = Join-Path $zw "warp-guard.vbs"
     $wgAct = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "`"$wgVbs`""

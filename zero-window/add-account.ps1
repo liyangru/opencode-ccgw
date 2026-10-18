@@ -2,7 +2,7 @@
 #
 # Each account runs its own headless `opencode-cli serve` on its own port with
 # an isolated profile (separate USERPROFILE / XDG dirs), so logins, session
-# stores and rate-limit quotas are fully separate. The gateway (server.mjs)
+# stores are separate. Upstream account/IP quotas can still be shared. The gateway (server.mjs)
 # reads zero-window\accounts.json and spreads requests across all accounts.
 #
 # Usage:
@@ -72,11 +72,8 @@ $acctDir = Join-Path $zw "accounts\$Name"
 if (Test-Path $acctDir) { throw "already exists: $acctDir" }
 $home2 = Join-Path $acctDir "home"
 New-Item -ItemType Directory -Force $home2 | Out-Null
-$srcCfg = Join-Path $env:USERPROFILE ".config\opencode\opencode.json"
-if (Test-Path $srcCfg) {
-  New-Item -ItemType Directory -Force (Join-Path $home2 ".config\opencode") | Out-Null
-  Copy-Item $srcCfg (Join-Path $home2 ".config\opencode\opencode.json") -Force
-}
+New-Item -ItemType Directory -Force (Join-Path $home2 ".config\opencode") | Out-Null
+[IO.File]::WriteAllText((Join-Path $home2 ".config\opencode\opencode.json"), '{"model":"opencode/deepseek-v4.1-flash-free","plugins":[],"providers":{}}', (New-Object Text.UTF8Encoding($false)))
 $chars = [char[]]((48..57) + (65..90) + (97..122))
 $pw = -join ($chars | Get-Random -Count 40)
 $serviceFile = Join-Path $acctDir "service.json"
@@ -88,6 +85,10 @@ Set sh = CreateObject("WScript.Shell")
 Set env = sh.Environment("PROCESS")
 env("USERPROFILE") = "$home2"
 env("HOME") = "$home2"
+env("APPDATA") = "$home2\AppData\Roaming"
+env("LOCALAPPDATA") = "$home2\AppData\Local"
+env("OPENCODE_CONFIG_DIR") = "$home2\.config\opencode"
+env("CCGW_PROFILE_HOME") = "$home2"
 env("XDG_CONFIG_HOME") = "$home2\.config"
 env("XDG_DATA_HOME") = "$home2\.local\share"
 env("XDG_STATE_HOME") = "$home2\.local\state"
