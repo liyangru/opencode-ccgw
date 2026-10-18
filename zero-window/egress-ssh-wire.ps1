@@ -116,6 +116,17 @@ switch ($Action) {
       try { Set-GatewayUpstream $orig } catch {}
       try { [void](Restart-Gateway) } catch {}
       & $bridgeScript -Action stop
+      "verifying the rollback with a real turn"
+      try {
+        if (-not (Test-UpstreamTurn)) { throw "turn did not return EGRESS-WIRE-OK" }
+        $h3 = Invoke-RestMethod 'http://127.0.0.1:8317/health' -TimeoutSec 5
+        if ($h3.egress.lastFamily -ne 'proxy' -or $h3.egress.connections -lt 1) {
+          throw "rollback turn did not use the original proxy (lastFamily=$($h3.egress.lastFamily) connections=$($h3.egress.connections))"
+        }
+        "rollback verified: turn ok, egress.lastFamily=$($h3.egress.lastFamily) connections=$($h3.egress.connections)"
+      } catch {
+        "WARN: rollback restored the upstream but verification failed: $($_.Exception.Message)"
+      }
       exit 1
     }
   }
