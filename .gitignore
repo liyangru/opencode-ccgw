@@ -34,3 +34,7 @@ zero-window/egress-vpngate.last
 # zero-window runtime (watchdog pause + renamed pause backups)
 zero-window/warp-guard.pause
 zero-window/*.pause.bak
+
+# Nord node rotation runtime state (groups file is source; these are machine-local)
+nord-rotate.state.json
+zero-window/nord-rotate.index

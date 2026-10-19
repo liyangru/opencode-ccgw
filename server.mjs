@@ -35,6 +35,8 @@ import {
   writeManifest,
   removeManifest,
   buildNameMap,
+  planBridgeTools,
+  unpackDispatcherCalls,
   sleep,
 } from "./engine.mjs"
 import {
@@ -57,6 +59,7 @@ import { describeRanked, fallbackChain as fallbackChainFn, isFreeModel, loadRank
 import { classifyError } from "./errors.mjs"
 import { loadCooldowns, saveCooldowns } from './cooldowns.mjs'
 import {attachEgress,readEgressKey} from './egress.mjs'
+import { rotateEgress } from './nord-rotate.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -335,6 +338,56 @@ function notePoolState() {
 }
 
 // ---------------------------------------------------------------------------
+// Exit rotation (Nord): a per-IP rate limit or an IP-level admission ban is
+// fixed by leaving through a different Nord node (user instruction 2026-10-19:
+// when quota is exhausted or the IP is refused, switch nodes automatically).
+// nord-rotate.mjs owns the guard (min interval, hourly cap, optional config
+// file); this file only decides when the signal is real.
+
+let nordRotating = false
+let accessDenials = []
+function poolWideLimited(model) {
+  const now = Date.now()
+  return (
+    accounts.length > 0 &&
+    accounts.some((a) => (a.rateLimits.get(model)?.until || 0) > now) &&
+    accounts.every((a) => readyAt(a, model) > now)
+  )
+}
+
+function rotateEgressAndReset(reason) {
+  // Rotate once, then drop local rate-limit cooldowns: they were recorded
+  // against the old exit IP, and the next attempt is exactly what decides
+  // whether the new node has fresh quota. Network-level cooldowns (instance
+  // unreachable) are left alone - they are unrelated to the exit IP.
+  if (nordRotating) return Promise.resolve({ rotated: false, reason: "in-flight" })
+  nordRotating = true
+  return rotateEgress({ reason, log: (evt, msg) => logLine({ phase: "nord-rotate", event: evt, msg }) })
+    .then((r) => {
+      if (!r?.rotated) return r
+      let cleared = 0
+      for (const a of accounts) {
+        cleared += a.rateLimits.size
+        a.rateLimits.clear()
+      }
+      accessDenials = []
+      if (cleared) {
+        notePoolState()
+        persistCooldowns()
+      }
+      logLine({ phase: "nord-rotate", event: "cooldowns-cleared", reason, group: r.group || null, ip: r.ip || null, cleared, msg: "new exit IP; local rate-limit cooldowns cleared so the next request retries immediately" })
+      return r
+    })
+    .catch((e) => {
+      logLine({ phase: "nord-rotate", event: "error", reason, msg: String(e?.message || e) })
+      return { rotated: false, reason: "error" }
+    })
+    .finally(() => {
+      nordRotating = false
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Small utilities
 
 class Semaphore {
@@ -450,10 +503,21 @@ async function handleTurn({ dialect, body, req, res }) {
   let bridgeName = null
   let manifest = null
   let nameMap = null
+  let routing = null
+  let dispatcherOriginal = null
   if (canon.tools.length) {
     bridgeName = "gw" + crypto.randomBytes(6).toString("hex")
-    nameMap = buildNameMap(canon.tools)
-    const sandboxTools = canon.tools.map((t) => ({
+    // Client tool lists can exceed the upstream limits (name length 64, list
+    // size 128): name-map with the bridge prefix budgeted, and route any
+    // overflow through one dispatcher tool.
+    const plan = planBridgeTools(canon.tools)
+    const bridgeTools = plan.dispatcher ? [...plan.direct, plan.dispatcher] : plan.direct
+    nameMap = buildNameMap(bridgeTools, { prefix: bridgeName })
+    if (plan.dispatcher) {
+      dispatcherOriginal = plan.dispatcher.name
+      routing = { overflow: new Set(plan.overflow.map((t) => t.name)), dispatcher: nameMap.origToSan.get(plan.dispatcher.name) }
+    }
+    const sandboxTools = bridgeTools.map((t) => ({
       name: nameMap.origToSan.get(t.name),
       description: t.description,
       inputSchema: t.inputSchema,
@@ -461,7 +525,7 @@ async function handleTurn({ dialect, body, req, res }) {
     manifest = writeManifest(sandboxTools)
   }
 
-  const promptText = renderPrompt(canon, bridgeName, nameMap?.origToSan)
+  const promptText = renderPrompt(canon, bridgeName, nameMap?.origToSan, routing)
 
   // Model-level fallback chain (see ranking.mjs fallbackChain()).
   const fallback = fallbackChainFn({
@@ -501,6 +565,9 @@ async function handleTurn({ dialect, body, req, res }) {
   let account = null
   let emitted = false
   const tried = new Set()
+  // At most one Nord exit rotation (and one same-model retry on the new exit)
+  // per request: a second rate limit after rotating is not a stale-IP signal.
+  let nordRetried = false
   let activeModel = model
   // The model that actually served the turn (may differ from the requested slot
   // after a model-level fallback). activeModel is cleared on success, so keep a
@@ -526,6 +593,23 @@ async function handleTurn({ dialect, body, req, res }) {
           if (outputRetries > 0) {
             error = new Error("output token limit: no account available to retry the same model")
             break
+          }
+          // Every account is cooling for this model. Before walking the model
+          // chain, try the remedy the user asked for: a different Nord node
+          // (fresh exit IP) and one retry of the same model on it.
+          // (clientGone is not assigned yet at this point in the loop body.)
+          if (!nordRetried && !ac.signal.aborted && !emitted && poolWideLimited(activeModel)) {
+            nordRetried = true
+            const rot = await rotateEgressAndReset("model-cooldown")
+            if (rot.rotated) {
+              logLine({ reqId, phase: "nord-rotate", event: "retry", model: activeModel, group: rot.group || null, msg: "every account cooling for this model; retrying it on the new exit" })
+              // The fresh tunnel needs a moment before it carries traffic; an
+              // immediate retry used to die with ECONNRESET mid-handshake.
+              await sleep(2000)
+              tried.clear()
+              attempt = -1
+              continue
+            }
           }
           // No account is usable for this model: either every account was
           // already tried for it, or all of them are cooling for it. If the
@@ -625,6 +709,18 @@ async function handleTurn({ dialect, body, req, res }) {
             a.lastError = failMsg.slice(0, 160)
             a.lastLimited = false
             notePoolState()
+            // A refusal storm ("can only be used from within OpenCode") is an
+            // IP-level gate: rotate nodes in the background once it repeats.
+            if (failure.kind === "access_denied") {
+              const now = Date.now()
+              accessDenials = accessDenials.filter((t) => now - t < 600_000)
+              accessDenials.push(now)
+              if (accessDenials.length >= 3 && !nordRetried) {
+                nordRetried = true
+                logLine({ reqId, phase: "nord-rotate", event: "trigger", reason: "access-denied", count: accessDenials.length, msg: "admission refusals repeated; rotating the exit in the background" })
+                void rotateEgressAndReset("access-denied")
+              }
+            }
           }
         }
         const modelUnavailable = failure.kind === "upstream"
@@ -647,6 +743,20 @@ async function handleTurn({ dialect, body, req, res }) {
           attempt = -1
           continue
         }
+        // Pool-wide rate limit for this model (every account is cooling for
+        // it): the user's remedy is a different Nord node. Rotate once and
+        // retry this model on the new exit before failing the request.
+        if (limited && !nordRetried && !emitted && !clientGone && poolWideLimited(activeModel)) {
+          nordRetried = true
+          const rot = await rotateEgressAndReset("rate-limit")
+          if (rot.rotated) {
+            logLine({ reqId, phase: "nord-rotate", event: "retry", model: activeModel, group: rot.group || null, msg: "pool-wide rate limit; retrying the same model on the new exit" })
+            await sleep(2000) // let the fresh Nord tunnel settle before retrying
+            tried.clear()
+            attempt = -1
+            continue
+          }
+        }
         error = e || r?.error || new Error(failMsg)
         break
         }
@@ -654,6 +764,11 @@ async function handleTurn({ dialect, body, req, res }) {
       }
     } finally {
       sem.release()
+    }
+    // Dispatcher calls stand for client tools that were not registered
+    // individually (the request exceeded the upstream tool count).
+    if (result && dispatcherOriginal) {
+      result.toolCalls = unpackDispatcherCalls(result.toolCalls || [], dispatcherOriginal)
     }
   } catch (e) {
     error = e

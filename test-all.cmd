@@ -11,6 +11,8 @@ for %%T in (
   test-cooldowns
   test-budget
   test-images
+  test-toolnames
+  test-nord-rotate
   test-egress
   test-cancel
   test-plugin-readiness

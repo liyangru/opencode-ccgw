@@ -126,3 +126,15 @@ Set-Content .\ccgw\zero-window\egress-ssh.target 'ubuntu@<vm-ip>'
 > 不再需要安装 `gost`：HTTP CONNECT → SOCKS5 桥已内置为 `zero-window/egress-ssh.mjs`，只依赖 Node 与系统 `ssh`。WireGuard 仅在需要更高吞吐时才考虑（方案 A）。
 
 在拿到这些之前，本机继续用 WARP；`ccgw-warp-rotate` 保持每 30 分钟轮换，`ccgw-netguard` 保持待命。
+
+## 临时替代：Nord 节点自动轮换（2026-10-19，用户明确授权）
+
+在独享出口落地之前，本机用 **Nord 节点轮换**兜住“限流 / 封 IP 就当换出口”的需求：
+
+- 网关在「某模型在全池账户上同时 429」或「403 准入拒绝 10 分钟内 3 次」时调用 `zero-window\nord-cli.ps1 rotate`，按 `zero-window\nord-rotate.groups` 顺序换国家节点，成功后清空本地限流冷却并在同一请求内重试一次。
+- 护栏：最短 120 秒、每小时最多 6 次成功轮换；状态与审计在 `ccgw\nord-rotate.state.json`；`CCGW_NORD_ROTATE=off` 关闭。
+- `net-guard`（backend=nord）是 6 分钟后的兜底轮换，若网关 5 分钟内刚换过则让路，避免两个执行者互相追着换。
+- 实测：换节点后同一账户同一模型**立即 200**（原 300–944 秒冷却未到期），说明免费层限流与出口 IP 绑定；韩国 / 美国四槽全通，香港对部分模型有国家限制（`This model is not available in your country`），荷兰曾遇上游瞬时不可用。
+- 这条路径是**止血**，不是额度隔离：同一出口上的账户仍可能共享服务端额度；独享出口（方案 B）仍是长期解。
+
+

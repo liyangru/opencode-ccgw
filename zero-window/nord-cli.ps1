@@ -13,10 +13,10 @@
 #   全程窗口不可见、不抢前台、不抢焦点。
 #
 # 用法:
-#   .\nord-cli.ps1 status|connect|disconnect
-# 可 dot-source 复用:Nord-Status / Nord-Connect [-Group 组名] / Nord-Disconnect
+#   .\nord-cli.ps1 status|connect|disconnect|rotate
+# 可 dot-source 复用:Nord-Status / Nord-Connect [-Group 组名] / Nord-Disconnect / Nord-Rotate
 # 冷启动兜底:若应用进程不在,自动转交 nord-ctl.ps1(UIA 引擎:屏幕外材料化 + 隐藏)。
-param([ValidateSet("status","connect","disconnect")][string]$Action = "")
+param([ValidateSet("status","connect","disconnect","rotate")][string]$Action = "")
 
 $ErrorActionPreference = "Continue"
 $script:NordExe     = "C:\Program Files\NordVPN\NordVPN.exe"
@@ -86,10 +86,64 @@ function Nord-Disconnect {
   return $false
 }
 
+function Nord-Rotate {
+  # 换到下一个 Nord 节点(按组轮换):断开 -> 连新组 -> 校验出口 IP。
+  # 用于"全池限流 / 出口 IP 被封时自动换节点"(ccgw nord-rotate.mjs、net-guard 共用)。
+  # 组列表:参数 > nord-rotate.groups 文件(每行一个)> 内置默认表。
+  param([string[]]$Groups = @())
+  $list = @($Groups | Where-Object { $_ })
+  if ($list.Count -eq 0) {
+    $gf = Join-Path $PSScriptRoot "nord-rotate.groups"
+    if (Test-Path $gf) {
+      $list = @(Get-Content $gf -Encoding UTF8 | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith("#") })
+    }
+  }
+  # 内置兜底顺序与 nord-rotate.groups 一致:优先实测四槽全通的国家。
+  if ($list.Count -eq 0) { $list = @("South Korea","United States","Japan","Singapore","Taiwan","Canada","Germany","United Kingdom","Netherlands","Hong Kong") }
+  $idxFile = Join-Path $PSScriptRoot "nord-rotate.index"
+  $start = 0
+  if (Test-Path $idxFile) {
+    $raw = Get-Content $idxFile -TotalCount 1 -ErrorAction SilentlyContinue
+    $v = 0
+    if ($raw -and [int]::TryParse("$raw".Trim(), [ref]$v)) { $start = $v }
+  }
+  $tries = [Math]::Min($list.Count, 3)                          # 最多试 3 个组,避免长时间打转
+  for ($k = 0; $k -lt $tries; $k++) {
+    $i = ($start + $k) % $list.Count
+    $g = $list[$i]
+    if ((Get-NordAdapterState) -eq "Up") { [void](Nord-Disconnect) }
+    Start-Sleep -Milliseconds 400
+    if (Nord-Connect -Group $g) {
+      try { Set-Content -Path $idxFile -Value (($i + 1) % $list.Count) -Encoding ASCII } catch {}
+      # 出口 IP 只用于审计;新隧道刚起来时 DNS/代理可能还没就绪,重试两次。
+      $ip = "unknown"
+      for ($a = 0; $a -lt 2 -and $ip -eq "unknown"; $a++) {
+        Start-Sleep -Milliseconds 1200
+        try {
+          $j = Invoke-RestMethod -Uri "https://api.ipify.org?format=json" -TimeoutSec 8
+          if ($j.ip) { $ip = $j.ip }
+        } catch {}
+        if ($ip -eq "unknown") {
+          try {
+            $j = Invoke-RestMethod -Uri "https://ipinfo.io/json" -TimeoutSec 8
+            if ($j.ip) { $ip = $j.ip }
+          } catch {}
+        }
+      }
+      Write-Host ("rotate: OK group={0} ip={1}" -f $g, $ip)
+      return $true
+    }
+    Write-Host ("rotate: group {0} failed, trying next" -f $g)
+  }
+  Write-Host "rotate: FAILED"
+  return $false
+}
+
 if ($Action) {
   switch ($Action) {
     "status"     { $s = Nord-Status; Write-Host ("state={0}  adapter={1}  window={2}" -f $s.state, $s.adapter, $s.window) }
     "connect"    { if (Nord-Connect) { Write-Host "connect: OK" } else { Write-Host "connect: FAILED"; exit 1 } }
     "disconnect" { if (Nord-Disconnect) { Write-Host "disconnect: OK" } else { Write-Host "disconnect: FAILED"; exit 1 } }
+    "rotate"     { if (Nord-Rotate) { exit 0 } else { exit 1 } }
   }
 }

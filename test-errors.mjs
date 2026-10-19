@@ -98,6 +98,10 @@ async function fixture(error, run, options = {}) {
       CCGW_SCRATCH: path.join(dir, "scratch"), CCGW_LOG: path.join(dir, "gateway.log"),
       CCGW_KEEP_SESSIONS: "1", CCGW_TOKEN: "fixture-only", CCGW_TURN_TIMEOUT: "3000",
       CCGW_STATE_FILE: path.join(dir,'cooldowns.json'),
+      // Offline tests must never touch the network: Nord exit rotation is
+      // stubbed per-test instead (CCGW_NORD_ROTATE=stub) when under test.
+      CCGW_NORD_ROTATE: "off", CCGW_NORD_STATE: path.join(dir, "nord-rotate.state.json"),
+      ...(options.env || {}),
       ...(options.cooldown !== undefined ? { CCGW_COOLDOWN_SECONDS: String(options.cooldown) } : {}) },
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],

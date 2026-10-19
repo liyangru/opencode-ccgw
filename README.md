@@ -20,7 +20,8 @@
 - **免费模型路由**:不匹配已知免费模型 ID 的模型名自动路由到默认模型(可用 `CCGW_MODEL` 配置)。
 - **零窗口模式**:登录自动启动(两个计划任务),无任何窗口;可完全不开桌面版使用。
 - **多账户账户池**:一账户一隔离实例(独立 profile / 端口 / 计划任务),网关轮询分摊请求,命中限流自动冷却并换户重试(见下文)。
-- **可选自动切出口**:所有已知免费模型在全池均进入限流冷却时,`net-guard` 按已有配置处理备用 VPN;此信号本身不能确定上游按 IP 限流。可通过 `net-guard.pause` 暂停自动切换,一键 `net-back` 回切(见下文)。
+- **全池限流自动换 Nord 节点(2026-10-19 用户授权)**:某模型在全部账户上同时 429,或 403 准入拒绝在 10 分钟内重复 3 次时,网关按 `zero-window\nord-rotate.groups` 的顺序换 Nord 国家节点,清空本地限流冷却,并在同一请求内用新出口重试一次;实测换节点后同一账户同一模型立即 200(原冷却未到期),说明限流与出口 IP 绑定。护栏:最短 120 秒、每小时最多 6 次,状态写 `nord-rotate.state.json`;`CCGW_NORD_ROTATE=off` 关闭。
+- **net-guard 兜底**:`net-guard`(backend=nord)在全池限流持续超过 6 分钟时也换节点,但网关 5 分钟内刚换过就让路;其它后端按已有配置处理。可通过 `net-guard.pause` 暂停自动切换,一键 `net-back` 回切(见下文)。
 - **备用出口保活**:`warp-guard`(计划任务 `ccgw-warp-guard`,登录时 + 每 ~10 分钟,`wscript` 无窗口)只在 WARP 掉线时自动重连,**永不主动断开**;暂停:`warp-guard.pause`。回切家宽仍是手动动作。网络切换只是止血,不等同于额度恢复。
 - **上游出口优选 IPv6**:原生 OpenCode 后端的上游连接优先走本机原生 IPv6(失败自动回退 IPv4),仅作用于 `opencode.ai:443`、仅限本机回环且带认证;运行状态见 `/health.egress`。
 - **CC Switch 深链生成**:一条命令生成 Claude Code / Codex 的一键导入链接。
@@ -119,6 +120,15 @@ Stop-ScheduledTask ccgw-gateway -ErrorAction SilentlyContinue; Start-ScheduledTa
 - `/health` 可达、事件流已连接或 `quotaExhausted:false` 均不代表模型调用成功或额度充足；额度与准入须以实际请求结果确认。
 
 回归验证：`node --test test-errors.mjs`（本地 HTTP/SSE 模拟，不消耗上游额度）。
+
+#### 出口 IP 与 Nord 节点轮换(2026-10-19 实测)
+
+- 触发条件:某模型在**全部账户**上同时 429(池内该模型已无可用账户),或准入拒绝(`FreeTierError` / `not available in your country`)在 10 分钟内出现 3 次。单账户限流不触发。
+- 动作:调用 `node zero-window\nord-cli.ps1 rotate` → 断开当前 Nord 节点 → 按 `zero-window\nord-rotate.groups` 的顺序连接下一个国家(实测每组约 7–25 秒)→ 输出 `rotate: OK group=<国家> ip=<出口 IP>`。
+- 换节点成功后清空**模型级**限流冷却(它们记录在旧出口 IP 上),保留实例失联类的冷却;当前请求会用新出口对同一模型重试一次(先等 2 秒让隧道稳定),客户端看到的是成功而不是 429。
+- 护栏:最短间隔 `CCGW_NORD_MIN_INTERVAL_SEC`(默认 120 秒);`CCGW_NORD_MAX_PER_HOUR`(默认 6 次/小时,只统计成功轮换);`CCGW_NORD_ROTATE=off` 整体关闭;`=stub` 为测试模式(只记录、不动网络)。审计状态在 `ccgw\nord-rotate.state.json`,事件日志 `phase:"nord-rotate"`。
+- 国家可用性(同一免费池实测):韩国、美国四槽全通;香港对部分模型返回 `This model is not available in your country`;荷兰曾遇 `Endpoint is unavailable`(上游瞬时)。默认顺序已把实测可用的国家排在前面,可直接编辑 `nord-rotate.groups` 调整。
+- 手动操作:`node nord-rotate.mjs`(遵守护栏)、`node nord-rotate.mjs --dry-run`(只看决策)、`node nord-rotate.mjs --force`(忽略护栏)、`.\zero-window\nord-cli.ps1 status|rotate`。
 
 网关仅从账户实例实时目录的 **`providerID = opencode` 原生 provider** 中识别已启用的免费模型——判据取自上游元数据本身(`cost = 0/0`,或名字带 `-free` 后缀;`big-pickle` 这类无后缀的免费模型也能自动认出)。本次原生免费目录为 10 个模型;其他本地 provider（包括指回网关的 provider）不参与发现与路由。免费列表按仓库根目录的 `model-ranks.json` 从强到弱排序,新出现的免费模型自动补到列表尾部(无需改代码;该文件热生效,约一分钟内刷新)。目录条目和免费标记不保证当前账户能成功调用。
 
@@ -396,13 +406,17 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 | `CCGW_COOLDOWN_SECONDS` | `300` | 命中限流后该账户的冷却时长(秒) |
 | `CCGW_DOWN_COOLDOWN_SECONDS` | `30` | 账户实例失联后的冷却时长(秒) |
 | `CCGW_STATE_FILE` | `.ccgw-state.json`（网关目录） | 持久化本地冷却截止时间与失败次数;重启后恢复,请勿作为源码同步 |
+| `CCGW_NORD_ROTATE` | `on` | Nord 节点自动轮换:`off` 关闭,`stub` 只记录决策不换网(测试用) |
+| `CCGW_NORD_MIN_INTERVAL_SEC` | `120` | 两次节点轮换的最短间隔(秒) |
+| `CCGW_NORD_MAX_PER_HOUR` | `6` | 每小时成功轮换次数上限 |
+| `CCGW_NORD_STATE` | `nord-rotate.state.json`（网关目录） | 轮换审计状态文件(测试可指向临时目录) |
 
 ## 验证与日志
 
 - `node smoke1.mjs` — 引擎冒烟(文本回合 + 工具捕获/中断)。
 - `node test-formats.mjs [anthropic|openai|responses|real]` — 全链路验收:三协议 ×(非流式 / 流式 / 工具往返),外加 `real` 组:模拟客户端**真实读取文件、真实执行命令**(输出含一次性 token,最终回答必须包含它们)。
 - `node test-ranking.mjs` — 免费模型识别 / 排名 / 自动选优自检。
-- `node --test test-errors.mjs test-protocol-regressions.mjs test-cooldowns.mjs test-budget.mjs test-images.mjs test-egress.mjs test-cancel.mjs test-plugin-readiness.mjs test-silent-node.mjs test-direct-ipv6.mjs` — 本地模拟回归(共 11 个套件,全部不调用真实上游):错误分类、输出预算、协议输入、冷却恢复、受管会话插件、内嵌图片、IPv6 出口 CONNECT、取消传播、插件就绪、GUI 子系统 node、原生 IPv6 直连。
+- `node --test test-errors.mjs test-protocol-regressions.mjs test-cooldowns.mjs test-budget.mjs test-images.mjs test-toolnames.mjs test-nord-rotate.mjs test-egress.mjs test-cancel.mjs test-plugin-readiness.mjs test-silent-node.mjs test-direct-ipv6.mjs` — 本地模拟回归(共 13 个套件,全部不调用真实上游):错误分类、输出预算、协议输入、冷却恢复、受管会话插件、内嵌图片、上游工具上限(名称 64 / 数量 128 / 分发器)、Nord 轮换护栏、IPv6 出口 CONNECT、取消传播、插件就绪、GUI 子系统 node、原生 IPv6 直连。
 - `test-all.cmd` — 一键跑上面全部离线回归 + `test-ranking.mjs`;只看退出码(0 = 全绿)。
 - `node verify-live.mjs` — 对运行中的网关做健康 + 文本 + 工具往返快速验证。
 - `ccgw.log` — 每请求一行 JSON,路由证明 = `sessionID`(可在 OpenCode 桌面版里打开对应会话)。
@@ -509,3 +523,16 @@ MIT © 2026 liyangru
 原生 MCP 工具每次注册使用控制台版 node.exe，Windows 子进程可能分配控制台窗口。改为专用本机 GUI 子系统 Node 副本运行 stdio 桥接，不修改系统 Node 或官方 OpenCode 文件，保留 stdin/stdout 和工具权限。可执行文件存于 LocalAppData/ccgw/runtime，按原 Node 内容哈希分版本。无控制台子系统与 stdio 测试通过，正式工具 probe_sum(20,22) 往返仍返回 42。其他应用（包括 WorkBuddy）启动的命令窗口不属于此次改动。
 
 image_url 报错源于旧协议适配器主动拒绝图片。新增三协议内嵌图片提取，字节作为原生 files 发送；历史文本保留附件名标记，支持工具图片结果。不抓取任意远程网址或本地路径；上限 20 张、解码字节合计 15MB，入口请求体限制仍适用。图片由官方后台实际解码。hub → ccgw → GLM 在 Chat、Claude Messages 和 Codex Responses 三种请求中均准确读出测试图 Q7M42（字符只在图片中，不在提示词中）。
+
+## 2026-10-19：上游工具上限（名称 64 / 数量 128）与桥接分发器
+
+桌面端 Claude Code 一次会带 137–141 个工具，其中 MCP 名称很长。上游免费层有两条硬限制：`tools[*].function.name` ≤ 64 字符、`tools` 数组 ≤ 128 项。旧实现把名称截到 60 字符后再加 14 字符桥接前缀（最长 75），并且把 137 个工具全部注册，于是同一类回合先后报 `Invalid value for 'tools[75].function.name': maximum string length is 64` 和 `Invalid value for 'tools': maximum number of items is 128`。
+
+修复：
+
+- `buildNameMap(tools, { prefix })` 按前缀长度预算截断（64 − 前缀 − 去重后缀），长名称截断后的冲突用 `_n` 去重，往返映射不变。
+- `planBridgeTools()` 把桥接预算限制在 128 以内（预留 16 个 OpenCode 内置工具）：前 111 个直接注册，其余通过一个随机命名的分发器工具 `gwcall*` 暴露；模型调用 `{"name": "<工具名>", "input": {...}}`，网关在返回客户端前解包成原始工具调用（`unpackDispatcherCalls`），流式与非流式共用同一条解包路径。
+- 提示词同步：直接注册的工具按精确 wire 名列出，溢出工具列在分发器下；助手历史里的旧工具调用也会渲染成分发器形式，避免模型看到不存在的工具名。
+- 回归：`node --test test-toolnames.mjs`（8 项）覆盖 64/128 两条限制、去重、往返映射、分发器解包与提示词渲染；`test-errors.mjs` 另加了两个服务级用例（全池 429 触发换节点并同模型重试、单账户限流不触发）。
+- 实测：137 工具 → 200 + `TOOLS-OK`（`tools:137`、bridge 非空）；桌面端 Code 回合 `tools:138/141` 连续成功，修复后日志不再出现两类 `invalid_value`。
+

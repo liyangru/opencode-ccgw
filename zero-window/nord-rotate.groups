@@ -1,0 +1,16 @@
+# Nord 节点轮换顺序(每行一个国家/组名;ccgw 限流/封 IP 时按此顺序换节点)
+# 实测 2026-10-19(免费池四槽:glm / deepseek / mimo / nemotron):
+#   韩国 Seoul        四槽全通
+#   美国 Seattle      四槽全通
+#   荷兰 Amsterdam    glm 遇上游瞬时不可用,其余通
+#   香港              部分模型有国家限制("not available in your country")
+South Korea
+United States
+Japan
+Singapore
+Taiwan
+Canada
+Germany
+United Kingdom
+Netherlands
+Hong Kong

@@ -8,6 +8,7 @@
 //  - captures bridge tool calls + interrupts the turn (client executes tools)
 //  - cleans up (idle-session sweep via sweepOldSessions, MCP delete,
 //    manifest removal)
+import crypto from "node:crypto"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -334,23 +335,83 @@ export function removeManifest(dir) {
   } catch {}
 }
 
+// The upstream free tier validates the wire tool name (OpenCode exposes MCP
+// tools as "<bridgeName>_<sanitized>") against a 64-character limit, so the
+// sanitized part must be budgeted for the bridge prefix plus the dedupe suffix
+// a large client tool list constantly collides into after truncation.
+export const UPSTREAM_MAX_TOOL_NAME = 64
+// The upstream also rejects a `tools` array above 128 entries. OpenCode adds
+// its own built-in tools on top of the bridge, so the bridge list stays below
+// that on its own.
+export const UPSTREAM_MAX_TOOLS = 128
+export const BUILTIN_TOOL_RESERVE = 16
+
 // Sanitize client tool names into MCP-safe names. Returns maps both ways.
-export function buildNameMap(tools) {
+export function buildNameMap(tools, options = {}) {
+  const prefix = options.prefix || ""
+  const maxLen = Number(options.maxLen) || UPSTREAM_MAX_TOOL_NAME
+  const reserve = options.reserve === undefined ? 4 : Number(options.reserve)
+  const budget = Math.max(8, maxLen - (prefix ? prefix.length + 1 : 0) - reserve)
   const used = new Set()
   const origToSan = new Map()
   const sanToOrig = new Map()
   for (const t of tools) {
     const original = String(t.name || "")
-    let s = original.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 60)
-    if (!s || /^[0-9]/.test(s)) s = "t_" + s
-    let base = s
+    let base = original.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, budget)
+    if (!base || /^[0-9]/.test(base)) base = ("t_" + base).slice(0, budget)
+    let s = base
     let n = 1
-    while (used.has(s)) s = `${base}_${n++}`
+    while (used.has(s)) {
+      const suffix = "_" + n++
+      s = base.slice(0, Math.max(1, budget - suffix.length)) + suffix
+    }
     used.add(s)
     origToSan.set(original, s)
     sanToOrig.set(s, original)
   }
   return { origToSan, sanToOrig }
+}
+
+// A client can offer more tools than the upstream accepts in one request
+// (desktop Claude Code sends 137). Bridge the first N directly and route the
+// rest through one dispatcher tool: the model calls dispatcher({name, input})
+// and unpackDispatcherCalls() rewrites it to the original client call.
+export function planBridgeTools(tools, options = {}) {
+  const maxTools = Number(options.maxTools) || UPSTREAM_MAX_TOOLS
+  const reserve = options.reserve === undefined ? BUILTIN_TOOL_RESERVE : Number(options.reserve)
+  const budget = Math.max(1, maxTools - reserve)
+  if (tools.length <= budget) return { direct: tools, overflow: [], dispatcher: null }
+  const direct = tools.slice(0, Math.max(0, budget - 1))
+  const overflow = tools.slice(direct.length)
+  const taken = new Set(tools.map((t) => String(t.name || "")))
+  let name = "gwcall"
+  while (taken.has(name)) name = "gwcall_" + crypto.randomBytes(2).toString("hex")
+  return {
+    direct,
+    overflow,
+    dispatcher: {
+      name,
+      description:
+        'Gateway dispatcher for client tools that were not registered individually in this request. ' +
+        'Call it with {"name": "<client tool name>", "input": {...that tool\'s arguments...}}.',
+      inputSchema: { type: "object", properties: { name: { type: "string" }, input: { type: "object" } }, required: ["name"] },
+    },
+  }
+}
+
+// Rewrite dispatcher calls back to the client tool they stand for.
+export function unpackDispatcherCalls(calls, dispatcherName) {
+  if (!dispatcherName || !Array.isArray(calls)) return calls
+  const out = []
+  for (const c of calls) {
+    if (c?.name === dispatcherName && c.input && typeof c.input === "object") {
+      const target = String(c.input.name || "")
+      if (!target) continue
+      const input = c.input.input && typeof c.input.input === "object" ? c.input.input : {}
+      out.push({ ...c, name: target, input, raw: JSON.stringify(input) })
+    } else out.push(c)
+  }
+  return out
 }
 
 // ---------------------------------------------------------------------------

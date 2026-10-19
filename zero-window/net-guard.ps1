@@ -94,6 +94,20 @@ function Egress-Connect {
   return $false
 }
 
+function Nord-RecentRotationSeconds {
+  # 网关(ccgw nord-rotate.mjs)也会自动换节点:它把成功轮换写进状态文件,
+  # 这里读到 5 分钟内的成功轮换就跳过,避免两个执行者互相追着换。
+  $sf = Join-Path (Split-Path -Parent $zw) "nord-rotate.state.json"
+  if (-not (Test-Path $sf)) { return -1 }
+  try {
+    $s = Get-Content $sf -Raw | ConvertFrom-Json
+    $last = 0
+    foreach ($e in @($s.events)) { if ($e.ok -and [double]$e.ts -gt $last) { $last = [double]$e.ts } }
+    if ($last -le 0) { return -1 }
+    return [int](([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - [long]$last) / 1000)
+  } catch { return -1 }
+}
+
 LG "net-guard started (backend=$Backend)"
 $switched = $false
 $alarmSent = $false
@@ -146,11 +160,28 @@ while ($true) {
         }
       } elseif (-not $alarmSent) {
         # 切换后账户池还有最多 ~5 分钟冷却排水期,期间 quota 必然仍为 true(正常现象);
-        # 只有超过排水期仍被限,才值得提醒"备用出口可能也被限"
+        # 只有超过排水期仍被限,才值得动作:换一个 Nord 节点(用户指示:限流/封 IP 自动换节点)
         if ($switchTime -and ((Get-Date) - $switchTime).TotalSeconds -gt 380) {
           $alarmSent = $true
-          LG "QUOTA EXHAUSTED still true >6min after switch - $BackendName exit may also be limited"
-          Toast "ccgw 提示" "备用出口($BackendName)可能也被限流,考虑换节点或回切"
+          if ($Backend -eq "nord") {
+            $since = Nord-RecentRotationSeconds
+            if ($since -ge 0 -and $since -lt 300) {
+              LG "QUOTA still exhausted; gateway rotated the Nord node $since s ago - leaving the exit alone"
+            } else {
+              LG "QUOTA still exhausted >6min on $BackendName - rotating to another Nord node"
+              if (Nord-Rotate) {
+                $switchTime = Get-Date
+                LG "Nord node rotation: OK"
+                Toast "ccgw 已自动换 Nord 节点" "备用出口仍被限流,已自动切换到新的 Nord 节点"
+              } else {
+                LG "Nord node rotation FAILED - manual action needed"
+                Toast "ccgw 提示" "Nord 节点轮换失败,请手动处理"
+              }
+            }
+          } else {
+            LG "QUOTA EXHAUSTED still true >6min after switch - $BackendName exit may also be limited"
+            Toast "ccgw 提示" "备用出口($BackendName)可能也被限流,考虑换节点或回切"
+          }
         }
       }
     } else {

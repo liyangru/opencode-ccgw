@@ -258,8 +258,14 @@ export function applyToolChoice(canon, toolChoice) {
 // ---------------------------------------------------------------------------
 // Transcript rendering
 
-export function renderPrompt(canon, bridgeName, origToSan) {
+export function renderPrompt(canon, bridgeName, origToSan, routing = null) {
   const lines = []
+  const wireName = (origName) => {
+    const san = origToSan?.get(origName)
+    return bridgeName && san ? bridgeName + "_" + san : null
+  }
+  const overflow = routing?.overflow instanceof Set ? routing.overflow : new Set()
+  const dispatcherWire = routing?.dispatcher && bridgeName ? bridgeName + "_" + routing.dispatcher : null
   if (canon.system.trim()) {
     lines.push("System instructions:")
     lines.push(canon.system.trim())
@@ -274,8 +280,12 @@ export function renderPrompt(canon, bridgeName, origToSan) {
       if (m.text) lines.push("Assistant: " + m.text)
       for (const tu of m.toolUses || []) {
         toolNameById.set(tu.id, tu.name)
-        const full = bridgeName && origToSan ? bridgeName + "_" + (origToSan.get(tu.name) || tu.name) : tu.name
-        lines.push("Assistant called tool " + full + " with arguments " + (tu.raw || JSON.stringify(tu.input ?? {})))
+        const raw = tu.raw || JSON.stringify(tu.input ?? {})
+        const direct = wireName(tu.name)
+        if (direct) lines.push("Assistant called tool " + direct + " with arguments " + raw)
+        else if (dispatcherWire && overflow.has(tu.name)) {
+          lines.push("Assistant called tool " + dispatcherWire + " with arguments " + JSON.stringify({ name: tu.name, input: tu.input ?? {} }))
+        } else lines.push("Assistant called tool " + tu.name + " with arguments " + raw)
       }
       if (!m.text && !(m.toolUses || []).length) lines.push("Assistant: (no content)")
     } else if (m.role === "tool") {
@@ -290,8 +300,14 @@ export function renderPrompt(canon, bridgeName, origToSan) {
   if (canon.tools.length && bridgeName && origToSan) {
     lines.push("Client tool routing:")
     lines.push("Execute operations requested in this conversation with the client's bridged tools below. The built-in read tool belongs to the isolated gateway backend, not the user's workspace; do not use it for client file reads.")
+    lines.push("Directly registered bridge tools (call them by exactly this name):")
     for (const t of canon.tools) {
-      lines.push(t.name + " -> " + bridgeName + "_" + (origToSan.get(t.name) || t.name))
+      const direct = wireName(t.name)
+      if (direct) lines.push(t.name + " -> " + direct)
+    }
+    if (dispatcherWire && overflow.size) {
+      lines.push("Additional client tools reachable through the dispatcher " + dispatcherWire + " (call that tool with " + JSON.stringify({ name: "<tool name>", input: {} }) + "):")
+      for (const t of canon.tools) if (overflow.has(t.name)) lines.push(t.name)
     }
     lines.push("")
   }
@@ -311,8 +327,11 @@ export function renderPrompt(canon, bridgeName, origToSan) {
     }
   }
   if (canon.tools.length && canon.forcedTool) {
-    const full = bridgeName + "_" + (origToSan.get(canon.forcedTool) || canon.forcedTool)
-    directive += " For this request you must call the tool '" + full + "'."
+    const direct = wireName(canon.forcedTool)
+    if (direct) directive += " For this request you must call the tool '" + direct + "'."
+    else if (dispatcherWire && overflow.has(canon.forcedTool)) {
+      directive += " For this request you must call the tool '" + dispatcherWire + "' with {\"name\": \"" + canon.forcedTool + "\", \"input\": {...}}."
+    }
   }
   lines.push(directive)
   return lines.join("\n")
