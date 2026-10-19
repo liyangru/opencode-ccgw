@@ -41,6 +41,14 @@ export function isModelLevelRefusal(message) {
 // and add 30+ seconds to the request).
 const CONTROL_PLANE = /^OpenCode (?:GET|POST|PUT|PATCH|DELETE) \S+ timed out after \d+ms|^(?:GET|POST|PUT|PATCH|DELETE) \S+ -> 5\d\d\b|gateway session plugin is not active/i
 
+// A turn the gateway aborts itself is a latency failure, not a model or
+// account refusal: the idle window elapsed with no session event at all
+// (engine.mjs "timeout"), or the hard ceiling was reached while events kept
+// trickling ("turn max time exceeded"). Walking the ranked chain or rotating
+// accounts with the same huge prompt only multiplies the wait, so this gets
+// its own kind and the request fails honestly with 504.
+const TURN_TIMEOUT = /^(?:turn )?timeout$|^turn max time exceeded$/i
+
 function retryAfter(error) {
   if (Number.isFinite(error?.retryAfterMs) && error.retryAfterMs > 0) return error.retryAfterMs / 1000
   if (Number.isFinite(error?.retryAfterSeconds) && error.retryAfterSeconds > 0) return error.retryAfterSeconds
@@ -64,10 +72,11 @@ export function classifyError(error) {
   const freeTier = /FreeTierError/i.test(providerType) || /free tier can only be used from within OpenCode/i.test(message)
   const outputLimit = OUTPUT_LIMIT.test(message)
   const controlPlane = CONTROL_PLANE.test(message)
-  const status = outputLimit ? 400 : explicitStatus ?? (freeTier ? 403 : RATE_LIMIT.test(message) ? 429 : 502)
+  const turnTimeout = !explicitStatus && TURN_TIMEOUT.test(message)
+  const status = outputLimit ? 400 : turnTimeout ? 504 : explicitStatus ?? (freeTier ? 403 : RATE_LIMIT.test(message) ? 429 : 502)
   const geoBlocked = status === 403 && GEO_BLOCKED.test(message)
-  const kind = outputLimit ? "request" : status === 401 ? "authentication" : geoBlocked ? "upstream" : status === 403 ? "access_denied" : status === 429 ? "rate_limit" : NETWORK.test(message) || controlPlane ? "network" : "upstream"
-  const code = outputLimit ? "output_limit" : geoBlocked ? "model_geo_blocked" : freeTier && status === 403 ? "free_tier_access_denied" : kind === "authentication" ? "authentication_error" : kind === "access_denied" ? "access_denied" : kind === "rate_limit" ? "rate_limit_exceeded" : controlPlane ? "control_plane_error" : "upstream_error"
+  const kind = outputLimit ? "request" : turnTimeout ? "timeout" : status === 401 ? "authentication" : geoBlocked ? "upstream" : status === 403 ? "access_denied" : status === 429 ? "rate_limit" : NETWORK.test(message) || controlPlane ? "network" : "upstream"
+  const code = outputLimit ? "output_limit" : turnTimeout ? "turn_timeout" : geoBlocked ? "model_geo_blocked" : freeTier && status === 403 ? "free_tier_access_denied" : kind === "authentication" ? "authentication_error" : kind === "access_denied" ? "access_denied" : kind === "rate_limit" ? "rate_limit_exceeded" : controlPlane ? "control_plane_error" : "upstream_error"
   const type = outputLimit ? "invalid_request_error" : kind === "authentication" ? "authentication_error" : kind === "access_denied" ? "permission_error" : kind === "rate_limit" ? "rate_limit_error" : "api_error"
   return { message, status, kind, code, type, retryAfterSeconds: retryAfter(error) }
 }

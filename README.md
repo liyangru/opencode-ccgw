@@ -186,7 +186,7 @@ Stop-ScheduledTask ccgw-gateway -ErrorAction SilentlyContinue; Start-ScheduledTa
 - 客户端**显式指名**的模型绝不替换(只尝试该模型本身)。
 - 带图片的请求只在“确实能识图”的模型之间降级,不会落到收不了图的纯文本模型上;链尾还会排除**识图实测错误**的模型(`deepseek`),只保留 `visionTrusted` 里的模型。显式指名且能收图的模型作为第一跳保留,但不参与后续降级。
 - 也该机制由 `ranking.mjs` 的 `fallbackChain()` 构造、`server.mjs` 的账户/模型双层循环消费;`node test-model-fallback.mjs` 与 `test-ranking.mjs` 覆盖链构造与控制流。
-- **模型级停用(2026-10-19 新增)**:同一个模型连续被上游以模型级理由拒绝(`Model unavailable: opencode/<id>`、`Endpoint is unavailable`)达到 `CCGW_MODEL_PARK_STRIKES`(默认 2)次后,该模型被移出**自动降级链的尾部**(TTL 从 30 分钟起、每次追加拒绝 x4,上限 6 小时;一次成功即清零)。链头永不隐藏:显式指名的模型、槽位目标、排名第一的模型照旧先试一次——glm 的间歇性 `Endpoint is unavailable` 依旧靠走链解决,只是不再让失效模型在每一次走链时白烧一轮。实测:目录里长期失效的 `muse-spark-1.3-contributor-free`(排名 13,上游回 `Model unavailable`)过去是每次走链的链尾固定损耗,停用后自动链不再触碰;`/health.modelPark` 暴露当前停用清单(剩余秒数 + 加击次数)。见 `model-park.mjs`、`test-model-park.mjs`(7 项,含夹具端到端:两次模型级拒绝 → 停用 → 第三次请求不再走进该模型)与 `test-model-fallback.mjs` 的尾部跳过用例。
+- **模型级停用(2026-10-19 新增)**:同一个模型连续被上游以模型级理由拒绝(`Model unavailable: opencode/<id>`、`Endpoint is unavailable`)达到 `CCGW_MODEL_PARK_STRIKES`(默认 2)次后,该模型被移出**自动降级链的尾部**(TTL 从 30 分钟起、每次追加拒绝 x4,上限 6 小时;一次成功即清零)。链头永不隐藏:显式指名的模型、槽位目标、排名第一的模型照旧先试一次——glm 的间歇性 `Endpoint is unavailable` 依旧靠走链解决,只是不再让失效模型在每一次走链时白烧一轮。实测:目录里长期失效的 `muse-spark-1.3-contributor-free`(排名 13,上游回 `Model unavailable`)过去是每次走链的链尾固定损耗,停用后自动链不再触碰;`/health.modelPark` 暴露当前停用清单(剩余秒数 + 加击次数);记录落盘(`CCGW_MODEL_PARK_FILE`),重启不丢失;`/v1/models` 会给停用模型打 `ccgw_parked` 标记。见 `model-park.mjs`、`test-model-park.mjs`(10 项,含夹具端到端:两次模型级拒绝 → 停用 → 第三次请求不再走进该模型)与 `test-model-fallback.mjs` 的尾部跳过用例。
 
 **Claude Code 把各槽位直接按排名填好**(环境变量;填好后 `/model` 的 opus/sonnet/haiku 与后台任务各就各位):
 
@@ -204,8 +204,8 @@ export API_TIMEOUT_MS=600000                                       # 大模型�
 > Windows 上 `export X="v"` 换成 PowerShell 的 `$env:X="v"`(或 cmd 的 `set X=v`)。这些变量**不设也照样能用**:网关的槽位兜底会把 Claude 硬编码的模型名按上表自动路由;若版本还有 `ANTHROPIC_DEFAULT_FABLE_MODEL` 槽位,fable 默认归入 opus 槽。
 
 - **自动选优**:请求名只要是免费模型就直接用;**槽位名**按上表对齐;**未知 / 付费目录 / 占位名**(如 `claude-sonnet-5-5`、空)落到排名第一——不会再出现"付费名透传 → 免费号必然报错 → 账号误冷却"的连锁;别名 `auto` / `best` / `best-free` / `ccgw-auto` / `free-auto` 等价于"用第一"。
-- `GET /v1/models` 只列原生 provider 的**免费模型**(按排名顺序),每条带 `ccgw_rank`(排名)与 `ccgw_input`(桥接输入能力,与 `/health.freeRanked` 的 `bridgeInput` 同源),客户端模型选择器不混入其他 provider 或付费目录。
-- `GET /health` 的 `freeRanked` = 当前完整排名(每条含 `rank` / `id` / `name` / `input` / `bridgeInput` / `context`;`input` 保留上游目录能力,`bridgeInput` 表示当前桥接输入),另有 `modelSlots`(槽位映射)/ `defaultModel` / `modelPin` / `modelPark`(被模型级停用的模型:剩余秒数 + 加击次数);每次请求日志带 `model` + `modelSource`(`requested` / `slot:<槽位>` / `alias` / `not-free` / `top-free` / `default` / `static`)。
+- `GET /v1/models` 只列原生 provider 的**免费模型**(按排名顺序),每条带 `ccgw_rank`(排名)与 `ccgw_input`(桥接输入能力,与 `/health.freeRanked` 的 `bridgeInput` 同源),客户端模型选择器不混入其他 provider 或付费目录;生效中的停用模型保持列出,但带 `ccgw_parked: true` + `ccgw_parked_seconds`(两种形状都有)。
+- `GET /health` 的 `freeRanked` = 当前完整排名(每条含 `rank` / `id` / `name` / `input` / `bridgeInput` / `context`;`input` 保留上游目录能力,`bridgeInput` 表示当前桥接输入),另有 `modelSlots`(槽位映射)/ `defaultModel` / `modelPin` / `modelPark`(被模型级停用的模型:剩余秒数 + 加击次数)/ `turns`(回合延迟:`active` / `count` / `avgMs` / `maxMs` / `recent`);每次请求日志带 `model` + `modelSource`(`requested` / `slot:<槽位>` / `alias` / `not-free` / `top-free` / `default` / `static`)。
 - 想固定模型:`CCGW_MODEL=deepseek-v4.1-flash-free`(须在免费列表内;它只影响"兜底用哪个",槽位匹配优先);自检:`node test-ranking.mjs && node test-model-fallback.mjs`。
 
 ## 可选网络守卫与手动备用出口
@@ -399,7 +399,8 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 | `CCGW_TOKEN` | 空 | 访问口令。本机直连(回环、无转发头)免校验;隧道/局域网等远端来源必须带 `Authorization: Bearer <token>` 或 `x-api-key: <token>`(或 Basic `opencode:<token>`) |
 | `CCGW_SCRATCH` | `%TEMP%\ccgw-scratch` | 会话 location / 桥接注册目录(被清理后自动重建) |
 | `CCGW_MAX_CONCURRENCY` | `3` | 并发回合上限(排队) |
-| `CCGW_TURN_TIMEOUT` | `180000` | 单回合超时(ms) |
+| `CCGW_TURN_TIMEOUT` | `240000` | 回合**空闲**超时(ms):该时长内没有任何本会话事件(文本增量/工具/step/用量)才中止;健康长回合靠事件不断续命 |
+| `CCGW_TURN_MAX_MS` | `900000` | 回合硬上限(ms):即使事件不断,超过也中止(504 `turn_timeout`),不再走模型降级链 |
 | `CCGW_LOG` | `ccgw/ccgw.log` | JSONL 日志路径 |
 | `CCGW_KEEP_SESSIONS` | 空 | `1` = 不删除 OpenCode 会话(调试用) |
 | `CCGW_OPENCODE_URL` | 自动发现 | 强制指定 OpenCode 服务地址 |
@@ -416,13 +417,16 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 | `CCGW_MODEL_PARK_MS` | `1800000`(30 分钟) | 模型级拒绝使模型移出自动降级链尾部的基准时长(ms);`0` = 关闭停用(拒绝仍计数) |
 | `CCGW_MODEL_PARK_MAX_MS` | `21600000`(6 小时) | 停用时长的上限(ms):每次追加拒绝 x4 增长,到此封顶 |
 | `CCGW_MODEL_PARK_STRIKES` | `2` | 连续多少次模型级拒绝后开始停用(默认第 2 次);任何一次成功即清零 |
+| `CCGW_MODEL_PARK_FILE` | `model-park.state.json`（网关目录） | 停用记录落盘路径:加击/清零即时镜像写盘(临时文件 + rename),重启后沿用同一份加击次数与剩余 TTL 而不是重新学习;损坏文件按"从未停用"处理;已 .gitignore |
+| `CCGW_TURN_TRACK` | `10` | `/health.turns.recent` 保留的最近回合条数(每条含 reqId/ms/model/tools/ok/at);`0` = 不保留 |
+| `CCGW_SLOW_TURN_MS` | `120000` | 成功回合超过该毫秒数时落日志 `phase:"slow-turn"`;`0` = 关闭 |
 
 ## 验证与日志
 
 - `node smoke1.mjs` — 引擎冒烟(文本回合 + 工具捕获/中断)。
 - `node test-formats.mjs [anthropic|openai|responses|real]` — 全链路验收:三协议 ×(非流式 / 流式 / 工具往返),外加 `real` 组:模拟客户端**真实读取文件、真实执行命令**(输出含一次性 token,最终回答必须包含它们)。
 - `node test-ranking.mjs` — 免费模型识别 / 排名 / 自动选优自检。
-- `node --test test-errors.mjs test-protocol-regressions.mjs test-cooldowns.mjs test-model-park.mjs test-budget.mjs test-images.mjs test-toolnames.mjs test-nord-rotate.mjs test-egress.mjs test-cancel.mjs test-plugin-readiness.mjs test-silent-node.mjs test-direct-ipv6.mjs test-request-timeout.mjs test-geo-fallback.mjs` — 本地模拟回归(共 16 个套件,全部不调用真实上游):错误分类、输出预算、协议输入、冷却恢复、模型级停用(加击/TTL/上限/成功清零)、受管会话插件、内嵌图片、上游工具上限(名称 64 / 数量 128 / 分发器)、Nord 轮换护栏、IPv6 出口 CONNECT、取消传播、插件就绪、GUI 子系统 node、原生 IPv6 直连、控制面请求超时、模型国家限制降级。
+- `node --test test-errors.mjs test-protocol-regressions.mjs test-cooldowns.mjs test-model-park.mjs test-budget.mjs test-images.mjs test-toolnames.mjs test-nord-rotate.mjs test-egress.mjs test-cancel.mjs test-plugin-readiness.mjs test-silent-node.mjs test-direct-ipv6.mjs test-request-timeout.mjs test-turn-timeout.mjs test-geo-fallback.mjs` — 本地模拟回归(共 16 个套件,全部不调用真实上游):错误分类、输出预算、协议输入、冷却恢复、模型级停用(加击/TTL/上限/成功清零/落盘恢复/列表标记/回合延迟)、受管会话插件、内嵌图片、上游工具上限(名称 64 / 数量 128 / 分发器)、Nord 轮换护栏、IPv6 出口 CONNECT、取消传播、插件就绪、GUI 子系统 node、原生 IPv6 直连、控制面请求超时、回合空闲超时(事件重置/硬上限/504 不烧降级链)、模型国家限制降级。
 - `test-all.cmd` — 一键跑上面全部离线回归 + `test-ranking.mjs`;只看退出码(0 = 全绿)。
 - `node verify-live.mjs` — 对运行中的网关做健康 + 文本 + 工具往返快速验证。
 - `ccgw.log` — 每请求一行 JSON,路由证明 = `sessionID`(可在 OpenCode 桌面版里打开对应会话)。
@@ -579,6 +583,21 @@ image_url 报错源于旧协议适配器主动拒绝图片。新增三协议内�
 - `/health` 新增 `modelPark`（生效中的停用：剩余秒数 + 加击次数）；日志新增 `phase:"model-park"`。
 - 回归：`test-model-park.mjs` 7 项（6 项状态机：加击口径、×4 升级、6 小时封顶、成功清零、`0` 关闭、快照只列生效项、未知模型不误伤；1 项夹具端到端：两次模型级拒绝 → `/health.modelPark` 出现 → 第三次请求的链不再触碰该模型）；`test-errors.mjs` 新增 1 项拒绝措辞识别用例；`test-model-fallback.mjs` 新增 5 项链构造用例（尾部跳过、全停用保留链头、显式指名仍尝试、带图链不受影响、单模型链不空转）。
 - **实测（2026-10-19 12:54–12:59 本地，网关重启后加载新代码）**：普通请求 200（2.3 秒）；显式请求 `muse-spark-1.3-contributor-free` 两次，上游分别回 `Model unavailable: opencode/…`（502）与 `Model … has been deprecated.`（410）——**上游对同一个死模型有两种措辞**，识别正则同时覆盖这两者，否则加击只在一种措辞下累加、永远到不了停用阈值；第二次请求后 `/health.modelPark` 立即出现 `{"muse-spark-1.3-contributor-free":{"strikes":2,"seconds":1800,…}}`，日志落 `phase:"model-park"`。
+
+## 2026-10-19（二）：回合空闲超时、停用落盘、模型目录标记与延迟观测
+
+判据来自 `ccgw.log` 的真实桌面流量：14:21 一个 141 工具、输入约 26 万 token 的回合在 **181.8 秒**被旧硬超时（`CCGW_TURN_TIMEOUT=180000` 当墙钟用）判为 `timeout`，而同样规模的姐妹回合 124.4 秒就正常完成；旧分类下"超时"按 `upstream` 处理，还会拿着同一份超大提示继续走模型降级链。
+
+- **`CCGW_TURN_TIMEOUT` 改为空闲超时（默认 240 秒）**：`engine.mjs` 带进度时钟——本会话任意事件（文本增量 / 工具输入 / step / usage）都重置计时器；只有**完全静默**该时长才中止（消息仍是 `timeout`）。新增 `CCGW_TURN_MAX_MS`（默认 900 秒）作为"事件不断但永远不结束"的硬上限（`turn max time exceeded`）。
+- **回合超时独立分类**：`kind:"timeout"`、`code:"turn_timeout"`、HTTP **504**；不写模型停用、不走模型降级链、不冷却账户。只认"无状态码且消息恰为 timeout / turn max time exceeded"两种形态：上游 502 里出现 "timeout" 文案仍按上游分类（有回归用例）。
+- **每回合事件统计**：回合终线与 `slow-turn` 线都带 `events`（本会话事件数）与 `maxSilenceMs`（最长静默间隔）；`/health.turns` = `{active, count, avgMs, maxMs, recent}`（`recent` 保留最近 `CCGW_TURN_TRACK` 条，默认 10；`0` 关闭）。"慢"与"卡死"由此可分：`maxSilenceMs` 贴住空闲窗口 = 上游静默，`events` 持续而 `durationMs` 大 = 上游算得慢。
+- **停用记录落盘**：`CCGW_MODEL_PARK_FILE`（默认网关目录 `model-park.state.json`，已 .gitignore）。加击/清零即时镜像写盘（临时文件 + rename；损坏文件按"从未停用"处理），重启后沿用同一份加击次数与剩余 TTL，不再花两个失败回合重新学习。
+- **`/v1/models` 标记停用模型**：两种形状都带 `ccgw_parked: true` + `ccgw_parked_seconds`；模型保持列出、可显式点名（链头永不隐藏的语义不变）。
+- 回归：新增 `test-turn-timeout.mjs`（4 项：静默触发空闲中止并 `interrupt`、事件持续重置空闲时钟并在停止后中止 + 静默测量、硬上限、分类优先级）；`test-errors.mjs` 加 1 项门闩实测（静默上游 → 504 / `turn_timeout` / 只 prompt 一次 / 无 `model-fallback`）；`test-model-park.mjs` 扩到 10 项（落盘恢复 ×2、损坏自愈、`/v1/models` 双形状标记、`/health.turns`）；`test-all.cmd` 套件总数到 16。
+- **实测（2026-10-19 14:44–15:00 本地，网关已加载新代码）**：
+  - 旧代码 14:21 同形态回合 `181764ms → timeout`；新代码下三连大回合 **225.1s / 204.0s / 206.1s 全部成功**（`events=875/1068/962`，`maxSilenceMs=93.3s/36.4s/77.5s`，均远低于 240 秒空闲窗口）——正是旧墙钟会砍掉的时长。
+  - 14:55:00 抢到 `activeTurns=0` 窗口重启（杀 8317 监听进程 → `Start-ScheduledTask ccgw-gateway`），**5 秒**恢复（14:55:05 `/health` 双账户 eventStream=true，单实例 pid 19568）；重启后桌面流量照常（14:55:38 glm 2.98s、14:58:59 glm 18.6s 均成功）。
+  - 显式请求 `muse-spark-1.3-contributor-free` 两次：502 `Model unavailable` → 410 `has been deprecated.`，第二次即停用；`/health.modelPark` = `{"strikes":2,"seconds":1800,"reason":"…deprecated."}`；`model-park.state.json` 落盘（`until = savedAt + 1800s`）；两种形状的 `/v1/models` 都出现 `ccgw_parked:true, ccgw_parked_seconds:1800`。
 
 
 

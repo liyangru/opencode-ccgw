@@ -72,7 +72,12 @@ const SCRATCH = process.env.CCGW_SCRATCH || path.join(os.tmpdir(), "ccgw-scratch
 const LOG_FILE = process.env.CCGW_LOG || path.join(__dirname, "ccgw.log")
 const TOKEN = process.env.CCGW_TOKEN || ""
 const MAX_CONCURRENCY = Number(process.env.CCGW_MAX_CONCURRENCY || 3)
-const TURN_TIMEOUT = Number(process.env.CCGW_TURN_TIMEOUT || 180000)
+// Turn deadline: CCGW_TURN_TIMEOUT is an *idle* window (no session event for
+// this long aborts the turn — a huge desktop prompt can legitimately stream
+// nothing for minutes while the model works), and CCGW_TURN_MAX_MS is the hard
+// ceiling for a turn that keeps trickling events but never finishes.
+const TURN_TIMEOUT = Number(process.env.CCGW_TURN_TIMEOUT || 240000)
+const TURN_MAX_MS = Number(process.env.CCGW_TURN_MAX_MS || 900000)
 // Free models spend part of the output budget on hidden reasoning. A client
 // asking for a tiny max_tokens (e.g. 16) otherwise makes the upstream fail with
 // "Response still truncated ...", which used to walk the whole model chain.
@@ -358,12 +363,35 @@ const NORD_DRAIN_MS = Math.max(0, Number(process.env.CCGW_NORD_DRAIN_MS ?? 15000
 let accessDenials = []
 // Model-level refusals ("Model unavailable: opencode/<id>") park a model out of
 // the automatic fallback tail instead of costing a failed turn on every walk
-// (see model-park.mjs). CCGW_MODEL_PARK_MS=0 disables it.
+// (see model-park.mjs). The record is mirrored to model-park.state.json so a
+// restart resumes the recorded strikes/TTL instead of re-learning them.
+// CCGW_MODEL_PARK_MS=0 disables parking.
 const modelPark = createModelPark({
   baseMs: Math.max(0, Number(process.env.CCGW_MODEL_PARK_MS ?? 30 * 60 * 1000) || 0),
   maxMs: Math.max(0, Number(process.env.CCGW_MODEL_PARK_MAX_MS ?? 6 * 60 * 60 * 1000) || 0),
   strikes: Math.max(1, Number(process.env.CCGW_MODEL_PARK_STRIKES ?? 2) || 2),
+  file: process.env.CCGW_MODEL_PARK_FILE || path.join(__dirname, "model-park.state.json"),
 })
+
+// Turn-level latency: desktop sessions with big tool lists legitimately take
+// minutes upstream, and we want that visible (/health.turns) without parsing
+// ccgw.log. Successful turns past CCGW_SLOW_TURN_MS also land in the log as
+// phase:"slow-turn", so a gateway stall can be told apart from upstream scale.
+const TURN_TRACK = Math.max(0, Number(process.env.CCGW_TURN_TRACK ?? 10) || 0)
+const SLOW_TURN_MS = Math.max(0, Number(process.env.CCGW_SLOW_TURN_MS ?? 120000) || 0)
+const turnStats = { count: 0, sumMs: 0, maxMs: 0, recent: [] }
+function recordTurn(rec) {
+  turnStats.count++
+  turnStats.sumMs += rec.ms
+  if (rec.ms > turnStats.maxMs) turnStats.maxMs = rec.ms
+  if (TURN_TRACK > 0) {
+    turnStats.recent.push(rec)
+    if (turnStats.recent.length > TURN_TRACK) turnStats.recent.splice(0, turnStats.recent.length - TURN_TRACK)
+  }
+  if (SLOW_TURN_MS > 0 && rec.ok && rec.ms >= SLOW_TURN_MS) {
+    logLine({ phase: "slow-turn", reqId: rec.reqId, model: rec.model, tools: rec.tools, durationMs: rec.ms, events: rec.events, maxSilenceMs: rec.maxSilenceMs, msg: "successful turn ran longer than CCGW_SLOW_TURN_MS (upstream generation scale, not a gateway stall)" })
+  }
+}
 function poolWideLimited(model) {
   const now = Date.now()
   return (
@@ -615,6 +643,9 @@ async function handleTurn({ dialect, body, req, res }) {
   let error = null
   let account = null
   let emitted = false
+  // Per-attempt upstream liveness stats (event count + longest silent gap),
+  // surfaced in the turn log so a slow turn can be told apart from a stalled one.
+  let lastStats = null
   const tried = new Set()
   // At most one Nord exit rotation (and one same-model retry on the new exit)
   // per request: a second rate limit after rotating is not a stale-IP signal.
@@ -719,6 +750,7 @@ async function handleTurn({ dialect, body, req, res }) {
             },
             signal: ac.signal,
             timeoutMs: TURN_TIMEOUT,
+            maxMs: TURN_MAX_MS,
             title: "ccgw " + dialect + " " + reqId,
             log: (_, m) => logLine({ reqId, phase: "turn", account: a.name, msg: m }),
           })
@@ -733,6 +765,7 @@ async function handleTurn({ dialect, body, req, res }) {
         }
 
         if (r?.sessionID) sid = r.sessionID
+        lastStats = r?.events || lastStats
         const failMsg = e ? String(e.message || e) : r?.error ? String(r.error.message || r.error) : null
         if (!failMsg) {
           result = r
@@ -886,10 +919,11 @@ async function handleTurn({ dialect, body, req, res }) {
 
   const durationMs = Date.now() - t0
   if (ac.signal.aborted || res.destroyed) return
+  recordTurn({ reqId, ms: durationMs, model: usedModel || activeModel || model, tools: canon.tools.length, ok: !(error || result?.error), at: Date.now(), events: lastStats?.count, maxSilenceMs: lastStats?.maxGapMs })
   if (error || result?.error) {
     const failure = classifyError(error || result?.error)
     const message = failure.message
-    logLine({ reqId, account: account?.name, dialect, requestedModel: canon.model, model: usedModel || activeModel || model, modelSource: pick.source, stream: canon.stream, tools: canon.tools.length, bridge: bridgeName, sessionID: sid, durationMs, error: message, upstreamStatus: failure.status, errorKind: failure.kind, errorCode: failure.code })
+    logLine({ reqId, account: account?.name, dialect, requestedModel: canon.model, model: usedModel || activeModel || model, modelSource: pick.source, stream: canon.stream, tools: canon.tools.length, bridge: bridgeName, sessionID: sid, durationMs, events: lastStats?.count, maxSilenceMs: lastStats?.maxGapMs, error: message, upstreamStatus: failure.status, errorKind: failure.kind, errorCode: failure.code })
     if (stream) {
       stream.fail(failure)
       res.end()
@@ -918,6 +952,8 @@ async function handleTurn({ dialect, body, req, res }) {
     textLen: result.text.length,
     usage: result.usage,
     durationMs,
+    events: lastStats?.count,
+    maxSilenceMs: lastStats?.maxGapMs,
   })
 
   if (canon.stream) {
@@ -972,6 +1008,13 @@ const server = http.createServer(async (req, res) => {
         egress: egress?.state() || null,
         nord: nordStatus(),
         modelPark: modelPark.snapshot(),
+        turns: {
+          active: activeTurns,
+          count: turnStats.count,
+          avgMs: turnStats.count ? Math.round(turnStats.sumMs / turnStats.count) : 0,
+          maxMs: turnStats.maxMs,
+          recent: [...turnStats.recent].reverse(),
+        },
       })
     }
 
@@ -980,10 +1023,16 @@ const server = http.createServer(async (req, res) => {
       const rankCfg = loadRankConfig()
       const ranked = rankFree(models.list, rankCfg.order)
       const byId = new Map(models.list.map((m) => [m.id, m]))
+      // Parked models stay listed (an explicit request still reaches them) but
+      // are marked, so a client can see why the automatic chain skips them.
+      const parked = modelPark.snapshot()
       const freeList = ranked
         .map((id, i) => {
           const m = byId.get(id)
-          return m ? { ...m, rank: i + 1 } : null
+          if (!m) return null
+          const out = { ...m, rank: i + 1 }
+          if (parked[id]) out.parkedSeconds = parked[id].seconds
+          return out
         })
         .filter(Boolean)
       const now = Math.floor(Date.now() / 1000)

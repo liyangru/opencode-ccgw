@@ -704,6 +704,7 @@ export function modelsAnthropic(list, now) {
       ...(m.rank ? { ccgw_rank: m.rank } : {}),
       ccgw_input: m.input?.includes('image') ? ['text','image'] : ['text'],
       ...(m.input ? { ccgw_upstream_input: m.input } : {}),
+      ...(m.parkedSeconds ? { ccgw_parked: true, ccgw_parked_seconds: m.parkedSeconds } : {}),
     })),
     has_more: false,
     first_id: list[0]?.id ?? null,
@@ -722,6 +723,7 @@ export function modelsOpenAI(list, now) {
       ...(m.rank ? { ccgw_rank: m.rank } : {}),
       ccgw_input: m.input?.includes('image') ? ['text','image'] : ['text'],
       ...(m.input ? { ccgw_upstream_input: m.input } : {}),
+      ...(m.parkedSeconds ? { ccgw_parked: true, ccgw_parked_seconds: m.parkedSeconds } : {}),
     })),
   }
 }

@@ -88,6 +88,65 @@ test('an unknown model is never parked', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Persistence: with a file configured the record survives a restart, so the
+// new process resumes the park (and the partial strike count) instead of
+// re-learning it in CCGW_MODEL_PARK_STRIKES turns.
+
+test('a configured file makes the park and strikes survive a restart', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccgw-park-file-'))
+  const file = path.join(dir, 'model-park.json')
+  try {
+    const c = clock()
+    const a = createModelPark({ now: c.now, file })
+    a.noteRefusal('dead-free', 'Model unavailable: opencode/dead-free')
+    a.noteRefusal('dead-free', 'Model unavailable: opencode/dead-free')
+    assert.equal(a.isParked('dead-free'), true)
+
+    const b = createModelPark({ now: c.now, file })
+    assert.equal(b.isParked('dead-free'), true, 'the restarted process still parks the model')
+    assert.equal(b.strikesFor('dead-free'), 2, 'the strike count carries over, not just the TTL')
+    assert.equal(b.snapshot()['dead-free'].reason, 'Model unavailable: opencode/dead-free')
+
+    b.noteSuccess('dead-free')
+    const d = createModelPark({ now: c.now, file })
+    assert.equal(d.isParked('dead-free'), false, 'a success clears the persisted record')
+    assert.equal(d.strikesFor('dead-free'), 0)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a pre-park strike survives a restart so one more refusal parks it', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccgw-park-file2-'))
+  const file = path.join(dir, 'model-park.json')
+  try {
+    const c = clock()
+    createModelPark({ now: c.now, file }).noteRefusal('flaky-free', 'Endpoint is unavailable')
+    const restarted = createModelPark({ now: c.now, file })
+    const r = restarted.noteRefusal('flaky-free', 'Endpoint is unavailable')
+    assert.equal(r.parked, true, 'the second strike overall parks it, even across a restart')
+    assert.equal(r.strikes, 2)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a corrupt file starts clean, and parking still works afterwards', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccgw-park-file3-'))
+  const file = path.join(dir, 'model-park.json')
+  try {
+    fs.writeFileSync(file, '{not json')
+    const park = createModelPark({ file })
+    assert.equal(park.isParked('m'), false, 'a corrupt file is ignored, not fatal')
+    park.noteRefusal('m', 'x')
+    park.noteRefusal('m', 'x')
+    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).entries.m.strikes, 2, 'the next write repairs the file')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------
 // End-to-end: the fixture upstream refuses one model exactly the way the live
 // pool does ("Model unavailable: opencode/<id>"). Two refused requests must
 // park it, and the third request's chain must not walk into it any more.
@@ -155,6 +214,7 @@ async function fixture(error, run, options = {}) {
       CCGW_SCRATCH: path.join(dir, 'scratch'), CCGW_LOG: path.join(dir, 'gateway.log'),
       CCGW_KEEP_SESSIONS: '1', CCGW_TOKEN: 'fixture-only', CCGW_TURN_TIMEOUT: '3000',
       CCGW_STATE_FILE: path.join(dir, 'cooldowns.json'),
+      CCGW_MODEL_PARK_FILE: path.join(dir, 'model-park.json'),
       CCGW_NORD_ROTATE: 'off', CCGW_NORD_STATE: path.join(dir, 'nord-rotate.state.json') },
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -179,6 +239,7 @@ async function fixture(error, run, options = {}) {
       log: () => fs.readFileSync(path.join(dir, 'gateway.log'), 'utf8'),
       health: async () => (await fetch(base + '/health')).json(),
       post: (route, body) => fetch(base + route, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+      get: (route, headers) => fetch(base + route, { headers }),
     })
   } finally {
     child.kill()
@@ -204,6 +265,18 @@ test('two model-level refusals park the model; the next chain skips it (end-to-e
     assert.ok(h.modelPark['dead-free'], '/health lists the parked model')
     assert.ok(Number(h.modelPark['dead-free'].seconds) > 0)
     assert.equal(h.modelPark['dead-free'].strikes, 2)
+    // The model list marks the park (both shapes) so a client can see why the
+    // automatic chain skips it; the model itself stays listed and requestable.
+    const listOA = await (await f.get('/v1/models')).json()
+    const dead = listOA.data.find((m) => m.id === 'dead-free')
+    assert.equal(dead.ccgw_parked, true, 'the OpenAI model list marks the parked model')
+    assert.ok(dead.ccgw_parked_seconds > 0, 'the mark carries the remaining seconds')
+    assert.ok(!listOA.data.find((m) => m.id === 'glm-5.3-flash-free')?.ccgw_parked, 'healthy models are not marked')
+    const listAN = await (await f.get('/v1/models', { 'anthropic-version': '2023-06-01' })).json()
+    assert.equal(listAN.data.find((m) => m.id === 'dead-free').ccgw_parked, true, 'the Anthropic model list marks it too')
+    // Turn tracking: every completed request lands in /health.turns.
+    assert.ok(h.turns && h.turns.count >= 2, 'completed turns are counted')
+    assert.ok(h.turns.recent.length >= 1 && typeof h.turns.recent[0].ms === 'number', 'recent turn latencies are exposed')
     assert.equal((await send()).status, 502)
     assert.equal(deadHits(), 2, 'the third request no longer walks into the parked model')
     assert.match(f.log(), /"phase":"model-park"/, 'the park is logged')

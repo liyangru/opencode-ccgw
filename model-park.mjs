@@ -15,8 +15,14 @@
 // "Endpoint is unavailable" is cured by the chain walk, not by demotion; see
 // ranking.mjs fallbackChain()).
 //
-// In memory only: a restart re-learns a dead model in at most
-// CCGW_MODEL_PARK_STRIKES turns. CCGW_MODEL_PARK_MS=0 disables parking.
+// With `file` set (server.mjs: CCGW_MODEL_PARK_FILE) every change is mirrored
+// to disk, so a gateway restart resumes the recorded strikes/TTL instead of
+// re-learning a dead model in CCGW_MODEL_PARK_STRIKES turns. Persistence is
+// best-effort: an unreadable or corrupt file just starts clean, and each write
+// goes through a tmp file + rename so a crash cannot leave a partial record.
+// CCGW_MODEL_PARK_MS=0 disables parking (refusals are still counted and kept).
+
+import fs from "node:fs"
 
 const BASE_MS = 30 * 60 * 1000
 const MAX_MS = 6 * 60 * 60 * 1000
@@ -27,8 +33,40 @@ export function createModelPark({
   maxMs = MAX_MS,
   strikes = STRIKES,
   now = () => Date.now(),
+  file = null, // persist the record here (a restart resumes it); null = memory only
+  maxEntries = 500, // upper bound on retained models; oldest `last` are pruned first
 } = {}) {
   const entries = new Map() // id -> { strikes, until, reason, last }
+
+  if (file) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(file, "utf8"))
+      for (const [id, e] of Object.entries(raw?.entries || {})) {
+        const rec = {
+          strikes: Math.max(0, Number(e?.strikes) || 0),
+          until: Number(e?.until) || 0,
+          reason: e?.reason ? String(e.reason).slice(0, 160) : null,
+          last: Number(e?.last) || 0,
+        }
+        if (rec.strikes > 0 || rec.until > now()) entries.set(String(id), rec)
+      }
+    } catch {} // missing/corrupt file = start clean
+  }
+
+  function save() {
+    if (!file) return
+    try {
+      if (entries.size > maxEntries) {
+        const byLast = [...entries.entries()].sort((a, b) => (b[1].last || 0) - (a[1].last || 0))
+        for (const [id] of byLast.slice(maxEntries)) entries.delete(id)
+      }
+      const body = { savedAt: now(), entries: {} }
+      for (const [id, e] of entries) body.entries[id] = { strikes: e.strikes, until: e.until, reason: e.reason, last: e.last }
+      const tmp = file + ".tmp"
+      fs.writeFileSync(tmp, JSON.stringify(body))
+      fs.renameSync(tmp, file)
+    } catch {} // best-effort; the authoritative record is in memory
+  }
 
   function isParked(id) {
     const e = entries.get(String(id))
@@ -46,6 +84,7 @@ export function createModelPark({
     const ms = Math.min(baseMs * 4 ** Math.max(0, e.strikes - strikes), maxMs)
     if (e.strikes >= strikes && ms > 0) e.until = now() + ms
     entries.set(key, e)
+    save()
     const t = now()
     return {
       parked: e.until > t,
@@ -56,7 +95,7 @@ export function createModelPark({
   }
 
   function noteSuccess(id) {
-    entries.delete(String(id))
+    if (entries.delete(String(id))) save()
   }
 
   // Active parks only, for /health: a monitor can see which models are being

@@ -516,6 +516,26 @@ test("a control-plane failure on every account fails without walking models", as
   }, { pluginFailure: () => 500 })
 })
 
+// A turn the gateway itself aborts (the idle window elapsed with zero session
+// events) is a latency failure, not a model or account refusal: the request
+// fails at once with 504 / turn_timeout instead of repeating the huge prompt
+// on every model in the ranked chain or cooling an account.
+test("a silent upstream trips the turn idle timeout: 504, one prompt, no chain walk", async () => {
+  await fixture(null, async (f) => {
+    const r = await f.post("/v1/chat/completions", body)
+    assert.equal(r.status, 504)
+    const j = await r.json()
+    assert.equal(j.error.code, "turn_timeout")
+    assert.equal(j.error.message, "timeout")
+    assert.equal(f.turns(), 1, "the silent model was prompted once despite the ranked chain")
+    await delay(300) // logLine appends asynchronously; give the error line time to land
+    const log = f.log()
+    assert.ok(!log.includes('"phase":"model-fallback"'), "no chain walk after a turn timeout")
+    assert.ok(log.includes('"errorCode":"turn_timeout"'), "the turn log names the timeout")
+    assert.ok(log.includes('"events":0'), "the silent attempt recorded zero upstream events")
+  }, { models: ["deepseek-v4.1-flash-free", "glm-5.3-flash-free"], delay: () => 1500, env: { CCGW_TURN_TIMEOUT: "400" } })
+})
+
 // The upstream reports a dead model with more than one wording (measured live:
 // "Model unavailable: opencode/<id>" and "Model <id> has been deprecated.").
 // model-park.mjs counts strikes from these texts, so both shapes must match.

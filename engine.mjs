@@ -461,7 +461,8 @@ export const READ_ONLY_PERMISSIONS = [
  *  - onTextDelta(text)
  *  - onToolCall({id, name, input, raw})  (name = original client tool name)
  *  - signal: AbortSignal (client disconnect)
- *  - timeoutMs
+ *  - timeoutMs: idle timeout — abort after this long with no session event
+ *  - maxMs: hard ceiling for a turn that keeps trickling events (0 = none)
  *  - maxOutputTokens: positive integer output-token cap for this request
  *  - log(contextObj, msg)
  *
@@ -478,6 +479,7 @@ export async function runTurn(oc, opts) {
     onToolCall,
     signal,
     timeoutMs = 180000,
+    maxMs = 0,
     log = () => {},
     title = "ccgw",
     maxOutputTokens,
@@ -538,7 +540,31 @@ export async function runTurn(oc, opts) {
 
   let graceTimer = null
   let timeoutTimer = null
+  let maxTimer = null
   let abortHandler = null
+
+  // Progress clock for the turn deadline. Any event for this session (text
+  // delta, tool input, step boundary, usage snapshot) proves the upstream is
+  // still working, so timeoutMs is an *idle* timeout: it re-arms on every
+  // event instead of capping wall-clock time. A 260k-token desktop prompt
+  // legitimately runs 2-3+ minutes; the old wall-clock cap cut healthy turns
+  // (measured live 2026-10-19: a 141-tool turn aborted at 181.8s while its
+  // sibling finished at 124.4s). maxMs stays as the hard ceiling for a turn
+  // that keeps trickling events forever. The same clock feeds the per-turn
+  // event stats (count / longest silent gap) that the gateway logs.
+  const eventStats = { count: 0, maxGapMs: 0, lastAt: 0 }
+  const armIdle = () => {
+    if (timeoutTimer) clearTimeout(timeoutTimer)
+    timeoutTimer = null
+    if (timeoutMs > 0) timeoutTimer = setTimeout(() => abortTurn("timeout"), timeoutMs)
+  }
+  const progress = () => {
+    const t = Date.now()
+    if (eventStats.lastAt) eventStats.maxGapMs = Math.max(eventStats.maxGapMs, t - eventStats.lastAt)
+    eventStats.lastAt = t
+    eventStats.count++
+    if (!settled) armIdle()
+  }
 
   const prefix = bridgeName ? bridgeName + "_" : null
 
@@ -580,6 +606,7 @@ export async function runTurn(oc, opts) {
   const unsub = oc.subscribe((ev) => {
     const d = ev?.data
     if (!d || d.sessionID !== sid) return
+    progress()
     switch (ev.type) {
       case "session.text.delta": {
         if (!state.firstTokenAt) state.firstTokenAt = Date.now()
@@ -717,13 +744,16 @@ export async function runTurn(oc, opts) {
     else signal.addEventListener("abort", abortHandler, { once: true })
   }
 
-  timeoutTimer = setTimeout(() => abortTurn("timeout"), timeoutMs)
+  eventStats.lastAt = Date.now()
+  armIdle()
+  if (maxMs > 0) maxTimer = setTimeout(() => abortTurn("turn max time exceeded"), maxMs)
 
   try {
     await oc.reqOrThrow("POST", `/api/session/${sid}/prompt`, { text: promptText, ...(files?.length ? {files} : {}) })
     await finished
   } finally {
     clearTimeout(timeoutTimer)
+    if (maxTimer) clearTimeout(maxTimer)
     if (graceTimer) clearTimeout(graceTimer)
     if (abortHandler && signal) signal.removeEventListener("abort", abortHandler)
     unsub()
@@ -744,5 +774,6 @@ export async function runTurn(oc, opts) {
     error: state.error,
     sessionID: sid,
     usage,
+    events: { count: eventStats.count, maxGapMs: eventStats.maxGapMs },
   }
 }
