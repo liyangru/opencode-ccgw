@@ -38,6 +38,14 @@ test("guard blocks after the hourly cap", () => {
   assert.equal(d.reason, "hourly-cap")
 })
 
+test("an hourly-cap window that has passed re-allows rotation", () => {
+  const now = 10_000_000
+  // A full cap of successful rotations older than an hour no longer counts, so
+  // the automatic path resumes without a restart.
+  const events = Array.from({ length: cfg.maxPerHour }, (_, i) => okEvent(now - 3_600_000 - (i + 1) * 1000))
+  assert.equal(planRotate({ events }, now, cfg).ok, true)
+})
+
 test("failed rotations do not count toward the guard", () => {
   const now = 10_000_000
   const events = Array.from({ length: cfg.maxPerHour + 2 }, (_, i) => ({ ts: now - (i + 1) * 1000, ok: false, reason: "test", detail: "boom" }))

@@ -609,6 +609,10 @@ async function handleTurn({ dialect, body, req, res }) {
   // At most one Nord exit rotation (and one same-model retry on the new exit)
   // per request: a second rate limit after rotating is not a stale-IP signal.
   let nordRetried = false
+  // Geo restrictions ("not available in your country") are exit-country
+  // specific: count them so a chain that is blocked end to end can rotate the
+  // exit once and replay itself instead of failing the request.
+  let geoBlocks = 0
   let activeModel = model
   // The model that actually served the turn (may differ from the requested slot
   // after a model-level fallback). activeModel is cleared on success, so keep a
@@ -758,15 +762,20 @@ async function handleTurn({ dialect, body, req, res }) {
             if (failure.code === "model_geo_blocked") {
               // Geo-restricted from the current exit: park this model briefly
               // and let the model-level chain walk on to the next ranked model.
+              // If the whole chain ends up blocked, the exit is the problem and
+              // the retry below moves to another Nord node.
+              geoBlocks++
               coolDown(a, "geo-blocked: " + failMsg.slice(0, 160), GEO_COOLDOWN_SECONDS, activeModel, failure.retryAfterSeconds)
             }
             a.lastError = failMsg.slice(0, 160)
             a.lastLimited = false
             notePoolState()
-            // A refusal storm ("can only be used from within OpenCode", "not
-            // available in your country") is an IP-level gate: rotate nodes in
-            // the background once it repeats.
-            if (failure.kind === "access_denied" || failure.code === "model_geo_blocked") {
+            // A refusal storm ("can only be used from within OpenCode",
+            // abusive-traffic IP block) is a network-level gate: rotate nodes in
+            // the background once it repeats. Geo restrictions do not count
+            // here - they are model-level and handled by the chain walk plus the
+            // exit retry below.
+            if (failure.kind === "access_denied") {
               const now = Date.now()
               accessDenials = accessDenials.filter((t) => now - t < 600_000)
               accessDenials.push(now)
@@ -807,6 +816,27 @@ async function handleTurn({ dialect, body, req, res }) {
           if (rot.rotated) {
             logLine({ reqId, phase: "nord-rotate", event: "retry", model: activeModel, group: rot.group || null, msg: "pool-wide rate limit; retrying the same model on the new exit" })
             await sleep(2000) // let the fresh Nord tunnel settle before retrying
+            tried.clear()
+            attempt = -1
+            continue
+          }
+        }
+        // The ranked chain is exhausted and at least one refusal was a geo
+        // restriction: the exit is in the wrong country for these models. Rotate
+        // once (clears the per-account geo parks) and replay the whole chain on
+        // the new node instead of failing the request. Only a geo/rate-limit
+        // failure at the end of the chain can be fixed by another exit; an auth
+        // or parameter error would burn a rotation for nothing.
+        const exitFixable = failure.code === "model_geo_blocked" || limited
+        if (geoBlocks > 0 && exitFixable && modelQueue.length === 1 && !nordRetried && !emitted && !clientGone) {
+          nordRetried = true
+          const rot = await rotateEgressAndReset("geo-blocked")
+          if (rot.rotated) {
+            logLine({ reqId, phase: "nord-rotate", event: "retry", reason: "geo-blocked", count: geoBlocks, group: rot.group || null, msg: "every model was refused from this exit; replaying the ranked chain on the new node" })
+            await sleep(2000) // let the fresh Nord tunnel settle before replaying
+            geoBlocks = 0
+            modelQueue.splice(0, modelQueue.length, ...fallback)
+            activeModel = model
             tried.clear()
             attempt = -1
             continue

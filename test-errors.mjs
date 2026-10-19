@@ -391,3 +391,81 @@ for (const [dialect, route, request] of [
     })
   })
 }
+
+// ---------------------------------------------------------------------------
+// Exit rotation triggers. Nord is stubbed (CCGW_NORD_ROTATE=stub): the guard
+// and the decision are exercised end to end, but no network is touched.
+
+const geoBlocked = { type: "provider.auth", status: 403, message: "This model is not available in your country" }
+
+test("a pool-wide 429 rotates the exit once and retries the same model on it", async () => {
+  // Both accounts answer 429 inside one request: the model is pool-wide
+  // limited, so the gateway rotates the exit and retries the same model on it.
+  await fixture(({ turn }) => turn <= 2 ? limited : null, async (f) => {
+    const r = await f.post("/v1/chat/completions", body)
+    assert.equal(r.status, 200)
+    assert.equal((await r.json()).choices[0].message.content, "FIXTURE_OK")
+    assert.equal(f.turns(), 3) // account a, account b, then the retry on the new node
+    const log = f.log()
+    assert.ok(log.includes('"event":"rotating"'), "rotation was attempted")
+    assert.ok(log.includes('"phase":"nord-rotate","event":"retry"'), "same-model retry on the new exit was logged")
+  }, { cooldown: 30, env: { CCGW_NORD_ROTATE: "stub" } })
+})
+
+test("an account-level 429 fails over to the next account without rotating", async () => {
+  await fixture(({ turn }) => turn === 1 ? limited : null, async (f) => {
+    assert.equal((await f.post("/v1/chat/completions", body)).status, 200)
+    assert.equal(f.turns(), 2)
+    assert.ok(!f.log().includes('"phase":"nord-rotate"'), "no rotation for a single-account limit")
+  }, { cooldown: 30, env: { CCGW_NORD_ROTATE: "stub" } })
+})
+
+test("a chain that is geo-blocked end to end rotates the exit once and replays it", async () => {
+  // Slot request: the ranked chain is [glm, deepseek]. Both models refuse this
+  // exit, so the gateway moves to another Nord node and replays the chain.
+  await fixture(({ turn }) => turn <= 2 ? geoBlocked : null, async (f) => {
+    const r = await f.post("/v1/messages", { model: "claude-opus-5", max_tokens: 64, messages: [{ role: "user", content: "diagnostic" }] })
+    assert.equal(r.status, 200)
+    assert.deepEqual(f.hits().map((h) => h.model), ["glm-5.3-flash-free", "deepseek-v4.1-flash-free", "glm-5.3-flash-free"])
+    const log = f.log()
+    assert.ok(log.includes('"reason":"geo-blocked"'), "the retry names the geo reason")
+    assert.ok(log.includes('"phase":"nord-rotate","event":"retry"'))
+    assert.equal((await f.health()).pool.quotaExhausted, false)
+  }, { models: ["glm-5.3-flash-free", "deepseek-v4.1-flash-free"], env: { CCGW_NORD_ROTATE: "stub" } })
+})
+
+test("a geo restriction on one model falls back without rotating the exit", async () => {
+  await fixture(({ model }) => model === "glm-5.3-flash-free" ? geoBlocked : null, async (f) => {
+    const r = await f.post("/v1/messages", { model: "claude-opus-5", max_tokens: 64, messages: [{ role: "user", content: "diagnostic" }] })
+    assert.equal(r.status, 200)
+    assert.deepEqual(f.hits().map((h) => h.model), ["glm-5.3-flash-free", "deepseek-v4.1-flash-free"])
+    assert.ok(!f.log().includes('"phase":"nord-rotate"'), "no exit change while another model serves")
+  }, { models: ["glm-5.3-flash-free", "deepseek-v4.1-flash-free"], env: { CCGW_NORD_ROTATE: "stub" } })
+})
+
+test("an auth failure after a geo block does not rotate the exit", async () => {
+  // The chain ended on a credential error: another exit cannot fix it, so the
+  // rotation budget must not be spent and the real reason must surface.
+  await fixture(({ model }) => model === "glm-5.3-flash-free"
+    ? geoBlocked
+    : { type: "provider.auth", status: 401, message: "invalid api key" }, async (f) => {
+    const r = await f.post("/v1/messages", { model: "claude-opus-5", max_tokens: 64, messages: [{ role: "user", content: "diagnostic" }] })
+    assert.equal(r.status, 401)
+    assert.ok(!f.log().includes('"phase":"nord-rotate"'), "no rotation for a non-exit failure")
+  }, { models: ["glm-5.3-flash-free", "deepseek-v4.1-flash-free"], env: { CCGW_NORD_ROTATE: "stub" } })
+})
+
+test("a rotation is deferred while another turn is still running", async () => {
+  await fixture(({ turn }) => turn >= 2 && turn <= 3 ? limited : null, async (f) => {
+    // A slow turn on another model holds the pool: the pool-wide-limited
+    // request must not rotate the node out from under it.
+    const slow = f.post("/v1/chat/completions", { ...body, model: "big-pickle" })
+    await waitFor(() => f.turns() >= 1)
+    const r = await f.post("/v1/chat/completions", body)
+    assert.equal(r.status, 429)
+    assert.equal((await slow).status, 200)
+    const log = f.log()
+    assert.ok(log.includes('"phase":"nord-rotate","event":"deferred"'), "rotation deferred for the running turn")
+    assert.ok(!log.includes('"event":"rotated"'), "no node change while a turn was running")
+  }, { cooldown: 30, models: ["deepseek-v4.1-flash-free", "big-pickle"], delay: ({ model }) => model === "big-pickle" ? 700 : 5, env: { CCGW_NORD_ROTATE: "stub", CCGW_NORD_DRAIN_MS: "0" } })
+})

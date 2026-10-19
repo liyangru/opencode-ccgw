@@ -20,7 +20,7 @@
 - **免费模型路由**:不匹配已知免费模型 ID 的模型名自动路由到默认模型(可用 `CCGW_MODEL` 配置)。
 - **零窗口模式**:登录自动启动(两个计划任务),无任何窗口;可完全不开桌面版使用。
 - **多账户账户池**:一账户一隔离实例(独立 profile / 端口 / 计划任务),网关轮询分摊请求,命中限流自动冷却并换户重试(见下文)。
-- **全池限流自动换 Nord 节点(2026-10-19 用户授权)**:某模型在全部账户上同时 429,或 403 准入拒绝在 10 分钟内重复 3 次时,网关按 `zero-window\nord-rotate.groups` 的顺序换 Nord 国家节点,清空本地限流冷却,并在同一请求内用新出口重试一次;实测换节点后同一账户同一模型立即 200(原冷却未到期),说明限流与出口 IP 绑定。护栏:最短 120 秒、每小时最多 6 次,状态写 `nord-rotate.state.json`;`CCGW_NORD_ROTATE=off` 关闭。
+- **全池限流 / 整链国家限制自动换 Nord 节点(2026-10-19 用户授权)**:某模型在全部账户上同时 429、403 准入拒绝在 10 分钟内重复 3 次,或**整条模型降级链都被 `This model is not available in your country` 拒绝**时,网关按 `zero-window\nord-rotate.groups` 的顺序换 Nord 国家节点,清空本地限流冷却,并在同一请求内用新出口重试一次(整链重放)。单个模型被国家限制只降到下一个模型、不换节点;链尾是认证/参数错误也不换。实测换节点后同一账户同一模型立即 200(原冷却未到期),说明限流与出口 IP 绑定。护栏:最短 120 秒、每小时最多 6 次,状态写 `nord-rotate.state.json`;`CCGW_NORD_ROTATE=off` 关闭。
 - **net-guard 兜底**:`net-guard`(backend=nord)在全池限流持续超过 6 分钟时也换节点,但网关 5 分钟内刚换过就让路;其它后端按已有配置处理。可通过 `net-guard.pause` 暂停自动切换,一键 `net-back` 回切(见下文)。
 - **备用出口保活**:`warp-guard`(计划任务 `ccgw-warp-guard`,登录时 + 每 ~10 分钟,`wscript` 无窗口)只在 WARP 掉线时自动重连,**永不主动断开**;暂停:`warp-guard.pause`。回切家宽仍是手动动作。网络切换只是止血,不等同于额度恢复。
 - **上游出口优选 IPv6**:原生 OpenCode 后端的上游连接优先走本机原生 IPv6(失败自动回退 IPv4),仅作用于 `opencode.ai:443`、仅限本机回环且带认证;运行状态见 `/health.egress`。
@@ -546,5 +546,14 @@ image_url 报错源于旧协议适配器主动拒绝图片。新增三协议内�
 - 模型列表单独收紧到 5 秒（`accountModels`），超时后沿用 60 秒缓存，`/health` 与路由继续可用。
 - `/health` 新增 `nord` 字段（`rotating` / `activeTurns` / `lastGroup` / `lastAt` / `lastIp` / `guard`），不必翻日志就能看轮换状态。
 - 回归：`test-request-timeout.mjs`（4 项）覆盖挂起超时、调用方中止保留原因、正常请求不变、预中止不发请求。
+
+## 2026-10-19：整链国家限制后的换节点重放 + 轮换触发器回归
+
+- `This model is not available in your country` 是**出口国家**维度、但按模型报的 403：单个模型命中时只把它短暂冷却并走排名降级链（不换节点）；只有当整条链都拒绝、且链尾仍是国家限制或 429 时，才阻塞式换一次 Nord 节点、清掉本次请求的模型冷却并**重放整条链**。链尾是 401/参数错误不换（换个出口也修不了，只会白烧一次轮换额度）。
+- 国家限制不再计入“403 准入风暴”计数；那条计数只留给网络级闸门（FreeTierError / abusive-traffic），避免一个被国家限制的模型把出口来回切。
+- 轮换触发器新增服务级回归（`test-errors.mjs`，Nord 用 `stub` 模式，不动网络）：全池 429 → 换节点并在同请求重试成功；单账户 429 → 账户间故障转移、不换节点；整链国家限制 → 换节点重放成功；单模型国家限制 → 降级不换；国家限制 + 链尾 401 → 不换；有进行中的回合 → `deferred` 跳过而不是掐断它。
+- 护栏窗口回归：`test-nord-rotate.mjs` 新增“满额轮换记录超过一小时后重新放行”；本机实测 `--dry-run` 返回 `hourly-cap / inHour:6`（窗口未满时的设计行为，不是故障）。
+- `net-guard`（backend=nord）用 `-Once -ForceQuota` 实测：识别到 Nord 适配器已连接后只记 `already on alternate egress ... (no action)`，不重复换网。
+- 本套件计数：`test-errors.mjs` 30 项、`test-nord-rotate.mjs` 15 项；`test-all.cmd` 全绿。
 
 
