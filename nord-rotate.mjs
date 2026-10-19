@@ -5,7 +5,9 @@
 // buckets requests per source IP, so a fresh node = a fresh bucket.
 //
 // Manual use:
-//   node nord-rotate.mjs            # decide + rotate once (guard applies)
+//   node nord-rotate.mjs            # decide + rotate once (guard applies; waits
+//                                   # up to CCGW_NORD_DRAIN_MS for in-flight
+//                                   # turns before cutting the tunnel)
 //   node nord-rotate.mjs --force    # ignore the guard
 //   node nord-rotate.mjs --dry-run  # decision only, never touch the network
 //
@@ -93,6 +95,62 @@ export async function waitForIdle(activeCount, opts = {}) {
   }
 }
 
+// The CLI is the manual/backstop rotation path and cannot see the gateway's
+// in-memory turn counter, so ask /health first: a rotation that starts while a
+// turn is streaming tears down the tunnel under it. Wait up to timeoutMs for
+// the count to reach idleAt, then PROCEED ANYWAY - this path is only used when
+// the pool is already failing (incident handling), so blocking the rotation
+// would prolong the outage. The gateway's own path in server.mjs keeps its
+// stricter drain (defer on timeout). `sleep`/`now` are injectable for tests.
+export async function drainCli(opts = {}) {
+  const {
+    healthUrl = process.env.CCGW_HEALTH_URL || "http://127.0.0.1:8317/health",
+    idleAt = 0,
+    timeoutMs = Number(process.env.CCGW_NORD_DRAIN_MS ?? 15000) || 0,
+    intervalMs = 250,
+    fetchImpl = fetch,
+    sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+    now = () => Date.now(),
+    log = () => {},
+  } = opts
+  const readTurns = async () => {
+    const ac = new AbortController()
+    const timer = setTimeout(() => ac.abort(), 2000)
+    try {
+      const r = await fetchImpl(healthUrl, { signal: ac.signal })
+      const j = await r.json()
+      const n = Number(j?.nord?.activeTurns)
+      return Number.isFinite(n) ? n : 0
+    } catch {
+      // An unreachable gateway means nothing to protect - treat as idle.
+      return 0
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  const t0 = now()
+  let turns = await readTurns()
+  if (turns <= idleAt) return { drained: true, waitedMs: 0, activeTurns: turns }
+  if (!(timeoutMs > 0)) {
+    log("drain", turns + " active turn(s) still running; CCGW_NORD_DRAIN_MS=0 - proceeding")
+    return { drained: false, skipped: true, waitedMs: 0, activeTurns: turns }
+  }
+  for (;;) {
+    const left = timeoutMs - (now() - t0)
+    if (left <= 0) break
+    await sleep(Math.min(intervalMs, left))
+    turns = await readTurns()
+    if (turns <= idleAt) break
+  }
+  const waitedMs = now() - t0
+  if (turns <= idleAt) {
+    if (waitedMs > 0) log("drain", "waited " + waitedMs + "ms for in-flight turns to finish")
+    return { drained: true, waitedMs, activeTurns: turns }
+  }
+  log("drain", turns + " turn(s) still running after " + waitedMs + "ms - proceeding (the pool is already failing)")
+  return { drained: false, timedOut: true, waitedMs, activeTurns: turns }
+}
+
 // Run zero-window\nord-cli.ps1 rotate and parse its one-line verdict.
 export function runRotateScript(timeoutMs = DEFAULT_CONFIG.timeoutMs) {
   return new Promise((resolve) => {
@@ -160,6 +218,11 @@ if (invokedDirectly) {
     const d = planRotate(loadState(), Date.now(), cfg, force)
     console.log(JSON.stringify({ mode: cfg.mode, enabled: cfg.enabled, minIntervalSec: cfg.minIntervalSec, maxPerHour: cfg.maxPerHour, decision: d }, null, 2))
   } else {
+    // Evaluate the (pure) guard first so a request that will be skipped does
+    // not waste the drain wait, then give in-flight turns a bounded chance to
+    // finish before the tunnel is torn down.
+    const decision = planRotate(loadState(), Date.now(), loadConfig(), force)
+    if (decision.ok) await drainCli({ log: write })
     const r = await rotateEgress({ reason: "cli", force, log: write })
     if (!r.rotated) process.exitCode = 1
   }

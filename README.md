@@ -127,7 +127,7 @@ Stop-ScheduledTask ccgw-gateway -ErrorAction SilentlyContinue; Start-ScheduledTa
 - 动作:调用 `node zero-window\nord-cli.ps1 rotate` → 断开当前 Nord 节点 → 按 `zero-window\nord-rotate.groups` 的顺序连接下一个国家(实测每组约 7–25 秒)→ 输出 `rotate: OK group=<国家> ip=<出口 IP>`。
 - 换节点成功后清空**模型级**限流冷却(它们记录在旧出口 IP 上),保留实例失联类的冷却;当前请求会用新出口对同一模型重试一次(先等 2 秒让隧道稳定),客户端看到的是成功而不是 429。
 - 护栏:最短间隔 `CCGW_NORD_MIN_INTERVAL_SEC`(默认 120 秒);`CCGW_NORD_MAX_PER_HOUR`(默认 6 次/小时,只统计成功轮换);`CCGW_NORD_ROTATE=off` 整体关闭;`=stub` 为测试模式(只记录、不动网络)。审计状态在 `ccgw\nord-rotate.state.json`,事件日志 `phase:"nord-rotate"`。
-- 不打断进行中的回合:换节点前先等**其他正在跑的请求**结束(最多 `CCGW_NORD_DRAIN_MS`,默认 15 秒)。Nord 一断开会连带掐断所有复用隧道的连接,所以超时就先不换(当前请求按 429/降级继续),等下一个请求再试;新请求遇到正在轮换也会等它落定再连上游。
+- 不打断进行中的回合:换节点前先等**其他正在跑的请求**结束(最多 `CCGW_NORD_DRAIN_MS`,默认 15 秒)。Nord 一断开会连带掐断所有复用隧道的连接,所以超时就先不换(当前请求按 429/降级继续),等下一个请求再试;新请求遇到正在轮换也会等它落定再连上游。手动 CLI(`node nord-rotate.mjs`)同样先读 `/health` 的 `activeTurns`,但它超时后**继续换**:该入口只在池已经失败时使用(值班/兜底),不能卡住恢复。
 - 国家可用性(同一免费池实测):韩国、美国四槽全通;香港对部分模型返回 `This model is not available in your country`;荷兰曾遇 `Endpoint is unavailable`(上游瞬时)。默认顺序已把实测可用的国家排在前面,可直接编辑 `nord-rotate.groups` 调整。
 - 手动操作:`node nord-rotate.mjs`(遵守护栏)、`node nord-rotate.mjs --dry-run`(只看决策)、`node nord-rotate.mjs --force`(忽略护栏)、`.\zero-window\nord-cli.ps1 status|rotate`。
 
@@ -410,7 +410,7 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 | `CCGW_NORD_ROTATE` | `on` | Nord 节点自动轮换:`off` 关闭,`stub` 只记录决策不换网(测试用) |
 | `CCGW_NORD_MIN_INTERVAL_SEC` | `120` | 两次节点轮换的最短间隔(秒) |
 | `CCGW_NORD_MAX_PER_HOUR` | `6` | 每小时成功轮换次数上限 |
-| `CCGW_NORD_DRAIN_MS` | `15000` | 换节点前等待其他进行中回合结束的上限;超时跳过本次轮换(避免掐断流式响应) |
+| `CCGW_NORD_DRAIN_MS` | `15000` | 换节点前等待其他进行中回合结束的上限;网关路径超时跳过本次轮换(避免掐断流式响应),手动 CLI 路径超时继续换,`0` 关闭等待 |
 | `CCGW_NORD_STATE` | `nord-rotate.state.json`（网关目录） | 轮换审计状态文件(测试可指向临时目录) |
 
 ## 验证与日志
@@ -553,8 +553,9 @@ image_url 报错源于旧协议适配器主动拒绝图片。新增三协议内�
 - 国家限制不再计入“403 准入风暴”计数；那条计数只留给网络级闸门（FreeTierError / abusive-traffic），避免一个被国家限制的模型把出口来回切。
 - 轮换触发器新增服务级回归（`test-errors.mjs`，Nord 用 `stub` 模式，不动网络）：全池 429 → 换节点并在同请求重试成功；单账户 429 → 账户间故障转移、不换节点；整链国家限制 → 换节点重放成功；单模型国家限制 → 降级不换；国家限制 + 链尾 401 → 不换；有进行中的回合 → `deferred` 跳过而不是掐断它。
 - 护栏窗口回归：`test-nord-rotate.mjs` 新增“满额轮换记录超过一小时后重新放行”；本机实测 `--dry-run` 返回 `hourly-cap / inHour:6`（窗口未满时的设计行为，不是故障）。
-- `net-guard`（backend=nord）用 `-Once -ForceQuota` 实测：识别到 Nord 适配器已连接后只记 `already on alternate egress ... (no action)`，不重复换网。
-- 本套件计数：`test-errors.mjs` 30 项、`test-nord-rotate.mjs` 15 项；`test-all.cmd` 全绿。
+- 手动轮换入口同样不掐流：`node nord-rotate.mjs` 先读 `/health` 的 `activeTurns`，最多等 `CCGW_NORD_DRAIN_MS`；超时则记 `[drain] N turn(s) still running ... proceeding` 后照常换（手动/兜底入口只在池已失败时使用，卡住恢复更糟）。用本机假 `/health`（5 个进行中回合）+ `CCGW_NORD_ROTATE=stub` 实测：等待 1236ms → proceeding → stub 轮换落盘，真实状态文件未被污染。
+- `net-guard`（backend=nord）用 `-Once -ForceQuota` 实测：识别到 Nord 适配器已连接后只记 `already on alternate egress ... (no action)`，不重复换网。其与网关的互斥判定（5 分钟内网关刚换过就跳过）用 AST 直接抽取真实函数做了 6 组边界实测（无文件 / 刚换 / 一小时前 / 仅失败 / 坏 JSON / 单事件数组），全部符合预期。
+- 本套件计数：`test-errors.mjs` 33 项（含下节新增 3 项）、`test-nord-rotate.mjs` 20 项（含本轮新增 5 项 drain 回归）；`test-all.cmd` 全绿。
 
 ## 2026-10-19：控制面失败不再当成“模型被拒”
 

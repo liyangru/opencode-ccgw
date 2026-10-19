@@ -7,7 +7,7 @@ import { test } from "node:test"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { planRotate, rotateEgress, loadState, saveState, waitForIdle, DEFAULT_CONFIG } from "./nord-rotate.mjs"
+import { planRotate, rotateEgress, loadState, saveState, waitForIdle, drainCli, DEFAULT_CONFIG } from "./nord-rotate.mjs"
 
 const cfg = { ...DEFAULT_CONFIG }
 const tmpState = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), "ccgw-nord-")), "state.json")
@@ -138,4 +138,63 @@ test("state file trimming keeps the newest events", () => {
   const saved = saveState({ events, lastAt: 80, lastGroup: "Japan" }, stateFile)
   assert.equal(saved.events.length, 50)
   assert.equal(loadState(stateFile).events.length, 50)
+})
+
+// --- CLI drain: the manual/backstop path must not cut a streaming turn -------
+
+const health = (activeTurns) => async () => ({ json: async () => ({ nord: { activeTurns } }) })
+
+test("drainCli returns immediately when no turn is talking to upstream", async () => {
+  let calls = 0
+  const r = await drainCli({
+    fetchImpl: async () => { calls++; return { json: async () => ({ nord: { activeTurns: 0 } }) } },
+  })
+  assert.equal(r.drained, true)
+  assert.equal(r.waitedMs, 0)
+  assert.equal(r.activeTurns, 0)
+  assert.equal(calls, 1)
+})
+
+test("drainCli waits until the last in-flight turn finishes", async () => {
+  let i = 0
+  const seq = [2, 0]
+  const r = await drainCli({
+    timeoutMs: 1000,
+    intervalMs: 0,
+    sleep: async () => {},
+    fetchImpl: async () => ({ json: async () => ({ nord: { activeTurns: seq[Math.min(i++, seq.length - 1)] } }) }),
+  })
+  assert.equal(r.drained, true)
+  assert.equal(r.activeTurns, 0)
+  assert.ok(i >= 2)
+})
+
+test("drainCli proceeds after the bounded wait instead of blocking the rotation", async () => {
+  let clock = 0
+  const logs = []
+  const r = await drainCli({
+    timeoutMs: 1000,
+    intervalMs: 0,
+    now: () => (clock += 500),
+    sleep: async () => {},
+    fetchImpl: health(3),
+    log: (evt, msg) => logs.push(evt + " " + msg),
+  })
+  assert.equal(r.drained, false)
+  assert.equal(r.timedOut, true)
+  assert.equal(r.activeTurns, 3)
+  assert.ok(logs.some((l) => l.includes("proceeding")))
+})
+
+test("drainCli treats an unreachable gateway as idle", async () => {
+  const r = await drainCli({ fetchImpl: async () => { throw new Error("ECONNREFUSED") } })
+  assert.equal(r.drained, true)
+  assert.equal(r.activeTurns, 0)
+})
+
+test("CCGW_NORD_DRAIN_MS=0 skips the CLI wait", async () => {
+  const r = await drainCli({ timeoutMs: 0, fetchImpl: health(2) })
+  assert.equal(r.drained, false)
+  assert.equal(r.skipped, true)
+  assert.equal(r.activeTurns, 2)
 })
