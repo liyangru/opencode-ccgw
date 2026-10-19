@@ -59,7 +59,7 @@ import { describeRanked, fallbackChain as fallbackChainFn, isFreeModel, loadRank
 import { classifyError } from "./errors.mjs"
 import { loadCooldowns, saveCooldowns } from './cooldowns.mjs'
 import {attachEgress,readEgressKey} from './egress.mjs'
-import { rotateEgress, waitForIdle } from './nord-rotate.mjs'
+import { rotateEgress, waitForIdle, loadState, loadConfig, planRotate, DEFAULT_CONFIG } from './nord-rotate.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -206,7 +206,7 @@ if (!KEEP_SESSIONS) {
 async function accountModels(a) {
   if (Date.now() - a.modelCache.at < 60000 && a.modelCache.ids.length) return a.modelCache
   try {
-    const r = await a.client.req("GET", "/api/model?location[directory]=" + encodeURIComponent(SCRATCH))
+    const r = await a.client.req("GET", "/api/model?location[directory]=" + encodeURIComponent(SCRATCH), undefined, { timeoutMs: 5000 })
     // This bridge runs the native OpenCode provider. Other locally configured
     // providers (including ccgw itself) are not part of that upstream catalog.
     const data = (r.json?.data || []).filter((m) => m.providerID === 'opencode')
@@ -362,6 +362,26 @@ function poolWideLimited(model) {
     accounts.some((a) => (a.rateLimits.get(model)?.until || 0) > now) &&
     accounts.every((a) => readyAt(a, model) > now)
   )
+}
+
+// Read-only view of the rotation guard for /health: a monitor can alert on a
+// stuck or exhausted guard without parsing ccgw.log.
+function nordStatus() {
+  let state = { events: [] }
+  let cfg = DEFAULT_CONFIG
+  try { state = loadState() } catch {}
+  try { cfg = loadConfig() } catch {}
+  const d = planRotate(state, Date.now(), cfg)
+  const last = [...(state.events || [])].reverse().find((e) => e.ok) || null
+  return {
+    rotating: nordRotating,
+    activeTurns,
+    drainMs: NORD_DRAIN_MS,
+    lastGroup: state.lastGroup || null,
+    lastAt: state.lastAt || null,
+    lastIp: last?.ip || null,
+    guard: { ok: !!d.ok, reason: d.reason || null, waitSec: d.waitSec || null, inHour: d.inHour ?? null },
+  }
 }
 
 function rotateEgressAndReset(reason) {
@@ -899,6 +919,7 @@ const server = http.createServer(async (req, res) => {
         })),
         pool: poolState(),
         egress: egress?.state() || null,
+        nord: nordStatus(),
       })
     }
 

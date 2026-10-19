@@ -386,7 +386,7 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 | POST | `/v1/chat/completions` | OpenAI Chat Completions(流式、工具) |
 | POST | `/v1/responses` | OpenAI Responses / Codex(流式、函数调用) |
 | GET | `/v1/models` | 免费模型列表,按排名顺序;每条带 `ccgw_rank` 排名与 `ccgw_input` 输入能力(带 `anthropic-version` 头返回 Anthropic 形状,否则 OpenAI 形状) |
-| GET | `/health` | 状态 + 账户池(连接/冷却/登录身份)+ `pool` 全池限流信号 + 模型目录 + `freeRanked` 免费模型排名(每条含 rank/input/bridgeInput/context)+ `modelSlots` 槽位映射 + `defaultModel` / `modelPin` + `egress`(上游出口:`preferredFamily` / `active` / `connections` / `failures` / `fallbacks` / `lastFamily`) |
+| GET | `/health` | 状态 + 账户池(连接/冷却/登录身份)+ `pool` 全池限流信号 + 模型目录 + `freeRanked` 免费模型排名(每条含 rank/input/bridgeInput/context)+ `modelSlots` 槽位映射 + `defaultModel` / `modelPin` + `egress`(上游出口:`preferredFamily` / `active` / `connections` / `failures` / `fallbacks` / `lastFamily`)+ `nord`(轮换状态:`rotating` / `activeTurns` / `lastGroup` / `lastAt` / `lastIp` / `guard`) |
 
 ## 环境变量
 
@@ -418,7 +418,7 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 - `node smoke1.mjs` — 引擎冒烟(文本回合 + 工具捕获/中断)。
 - `node test-formats.mjs [anthropic|openai|responses|real]` — 全链路验收:三协议 ×(非流式 / 流式 / 工具往返),外加 `real` 组:模拟客户端**真实读取文件、真实执行命令**(输出含一次性 token,最终回答必须包含它们)。
 - `node test-ranking.mjs` — 免费模型识别 / 排名 / 自动选优自检。
-- `node --test test-errors.mjs test-protocol-regressions.mjs test-cooldowns.mjs test-budget.mjs test-images.mjs test-toolnames.mjs test-nord-rotate.mjs test-egress.mjs test-cancel.mjs test-plugin-readiness.mjs test-silent-node.mjs test-direct-ipv6.mjs` — 本地模拟回归(共 13 个套件,全部不调用真实上游):错误分类、输出预算、协议输入、冷却恢复、受管会话插件、内嵌图片、上游工具上限(名称 64 / 数量 128 / 分发器)、Nord 轮换护栏、IPv6 出口 CONNECT、取消传播、插件就绪、GUI 子系统 node、原生 IPv6 直连。
+- `node --test test-errors.mjs test-protocol-regressions.mjs test-cooldowns.mjs test-budget.mjs test-images.mjs test-toolnames.mjs test-nord-rotate.mjs test-egress.mjs test-cancel.mjs test-plugin-readiness.mjs test-silent-node.mjs test-direct-ipv6.mjs test-request-timeout.mjs` — 本地模拟回归(共 14 个套件,全部不调用真实上游):错误分类、输出预算、协议输入、冷却恢复、受管会话插件、内嵌图片、上游工具上限(名称 64 / 数量 128 / 分发器)、Nord 轮换护栏、IPv6 出口 CONNECT、取消传播、插件就绪、GUI 子系统 node、原生 IPv6 直连、控制面请求超时。
 - `test-all.cmd` — 一键跑上面全部离线回归 + `test-ranking.mjs`;只看退出码(0 = 全绿)。
 - `node verify-live.mjs` — 对运行中的网关做健康 + 文本 + 工具往返快速验证。
 - `ccgw.log` — 每请求一行 JSON,路由证明 = `sessionID`(可在 OpenCode 桌面版里打开对应会话)。
@@ -537,4 +537,14 @@ image_url 报错源于旧协议适配器主动拒绝图片。新增三协议内�
 - 提示词同步：直接注册的工具按精确 wire 名列出，溢出工具列在分发器下；助手历史里的旧工具调用也会渲染成分发器形式，避免模型看到不存在的工具名。
 - 回归：`node --test test-toolnames.mjs`（8 项）覆盖 64/128 两条限制、去重、往返映射、分发器解包与提示词渲染；`test-errors.mjs` 另加了两个服务级用例（全池 429 触发换节点并同模型重试、单账户限流不触发）。
 - 实测：137 工具 → 200 + `TOOLS-OK`（`tools:137`、bridge 非空）；桌面端 Code 回合 `tools:138/141` 连续成功，修复后日志不再出现两类 `invalid_value`。
+
+## 2026-10-19：控制面请求有界（/health 与新建回合不再被上游卡死）
+
+`OpenCode.req()` 原来没有超时：本机 OpenCode 服务一旦不响应，模型列表、会话创建、中断和 `/health` 会一起永久挂起。实测在桌面端 + Codex 同时跑回合时，`/health` 连续 5 秒超时、`activeTurns` 只增不减，排障完全失明。
+
+- `req(method, path, body, { timeoutMs = 30000, signal })`：默认 30 秒上限，可传入调用方信号；超时抛 `OpenCode GET /api/... timed out after Nms`，不再返回裸 `AbortError`。
+- 模型列表单独收紧到 5 秒（`accountModels`），超时后沿用 60 秒缓存，`/health` 与路由继续可用。
+- `/health` 新增 `nord` 字段（`rotating` / `activeTurns` / `lastGroup` / `lastAt` / `lastIp` / `guard`），不必翻日志就能看轮换状态。
+- 回归：`test-request-timeout.mjs`（4 项）覆盖挂起超时、调用方中止保留原因、正常请求不变、预中止不发请求。
+
 

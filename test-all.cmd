@@ -18,6 +18,7 @@ for %%T in (
   test-plugin-readiness
   test-silent-node
   test-direct-ipv6
+  test-request-timeout
 ) do (
   echo.
   echo === %%T ===

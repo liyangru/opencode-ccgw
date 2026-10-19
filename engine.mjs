@@ -103,21 +103,42 @@ export class OpenCode {
     this.connected = false
   }
 
-  async req(method, p, body) {
-    const res = await fetch(this.baseUrl + p, {
-      method,
-      headers: {
-        Authorization: this.auth,
-        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-      },
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    })
-    const text = await res.text()
-    let json = null
+  async req(method, p, body, { timeoutMs = 30000, signal = null } = {}) {
+    // A hung OpenCode service used to hang this call forever: every caller that
+    // awaited it (model list, session creation, /health) stalled with it. Bound
+    // control-plane calls by default and let callers tighten the budget.
+    const ac = new AbortController()
+    let timer = null
+    const onAbort = () => ac.abort(signal?.reason)
+    if (signal) {
+      if (signal.aborted) ac.abort(signal.reason)
+      else signal.addEventListener("abort", onAbort, { once: true })
+    }
+    if (timeoutMs > 0) timer = setTimeout(() => ac.abort(new Error(`OpenCode ${method} ${p} timed out after ${timeoutMs}ms`)), timeoutMs)
     try {
-      json = text ? JSON.parse(text) : null
-    } catch {}
-    return { status: res.status, ok: res.ok, text, json, headers: { "retry-after": res.headers.get("retry-after") } }
+      const res = await fetch(this.baseUrl + p, {
+        method,
+        headers: {
+          Authorization: this.auth,
+          ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+        },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: ac.signal,
+      })
+      const text = await res.text()
+      let json = null
+      try {
+        json = text ? JSON.parse(text) : null
+      } catch {}
+      return { status: res.status, ok: res.ok, text, json, headers: { "retry-after": res.headers.get("retry-after") } }
+    } catch (e) {
+      // Report the timeout/abort reason instead of a bare AbortError.
+      if (ac.signal.aborted && ac.signal.reason instanceof Error) throw ac.signal.reason
+      throw e
+    } finally {
+      if (timer) clearTimeout(timer)
+      if (signal) signal.removeEventListener("abort", onAbort)
+    }
   }
 
   async reqOrThrow(method, p, body) {
