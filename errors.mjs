@@ -15,6 +15,21 @@ const OUTPUT_LIMIT = /still truncated|output token limit/i
 // check, abusive-traffic IP block) stay access_denied and keep feeding the
 // egress rotator.
 const GEO_BLOCKED = /not available in your (?:country|region)|not (?:supported|allowed|offered) in your (?:country|region)|(?:geo|region)[- ]?(?:restricted|blocked)/i
+// A model-level refusal names the model or the endpoint itself. The upstream
+// uses several shapes for a dead model, measured live on 2026-10-19:
+// "Model unavailable: opencode/muse-spark-1.3-contributor-free" (502) and
+// "Model muse-spark-1.3-contributor-free has been deprecated." (410); glm's
+// intermittent refusal is "Upstream request failed: Endpoint is unavailable.".
+// It says nothing about the account or the exit IP, so model-park.mjs may
+// remember it and skip the model in the automatic fallback tail. Parameter
+// errors ("所选模型不支持图片", the tool limits) and geo restrictions are NOT
+// model-level refusals: they describe the request or the exit, and parking a
+// model for them would be wrong.
+const MODEL_LEVEL_REFUSAL = /model unavailable|endpoint is unavailable|model not found|unknown model|model does not exist|no such model|deprecated|no longer (?:available|supported)|has been removed|decommissioned|retired/i
+
+export function isModelLevelRefusal(message) {
+  return MODEL_LEVEL_REFUSAL.test(String(message || ""))
+}
 
 // The gateway talks to its own OpenCode service for everything that is not the
 // model call itself: plugin readiness, session create, prompt, model list.

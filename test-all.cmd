@@ -9,6 +9,7 @@ for %%T in (
   test-errors
   test-protocol-regressions
   test-cooldowns
+  test-model-park
   test-budget
   test-images
   test-toolnames

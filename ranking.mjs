@@ -163,12 +163,20 @@ export function rankFree(models, order = DEFAULT_ORDER) {
 // never substituted, and an image request never falls back onto a model that
 // cannot read one.
 
-export function fallbackChain({ ranked, model, source, imageOk, hasFiles, visionTrusted = DEFAULT_VISION_TRUSTED }) {
+export function fallbackChain({ ranked, model, source, imageOk, hasFiles, visionTrusted = DEFAULT_VISION_TRUSTED, exclude }) {
   const rankedFromModel = ranked.includes(model)
     ? ranked.slice(ranked.indexOf(model))
     : [model]
   const base = source === "requested" ? [model] : rankedFromModel
-  const chain = base.filter((id, i, arr) => arr.indexOf(id) === i)
+  // The head is always attempted: an explicitly requested model, a slot target
+  // or the top-ranked pick is the caller's decision (glm's intermittent
+  // "Endpoint is unavailable" is cured by this walk, not by demoting it).
+  // exclude() only trims the tail — parked models (model-park.mjs) stop costing
+  // a failed turn on every walk without ever hiding the first attempt.
+  const dedupe = (id, i, arr) => arr.indexOf(id) === i
+  const chain = typeof exclude === "function"
+    ? base.filter((id, i) => i === 0 || !exclude(id)).filter(dedupe)
+    : base.filter(dedupe)
   if (!hasFiles) return chain
   // A model that cannot read an image at all has no safe chain (the caller
   // already rejects it with 400). An image-capable but not vision-trusted head

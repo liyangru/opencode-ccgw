@@ -56,8 +56,9 @@ import {
   countTokensApprox,
 } from "./formats.mjs"
 import { describeRanked, fallbackChain as fallbackChainFn, isFreeModel, loadRankConfig, pickModel, rankFree } from "./ranking.mjs"
-import { classifyError } from "./errors.mjs"
+import { classifyError, isModelLevelRefusal } from "./errors.mjs"
 import { loadCooldowns, saveCooldowns } from './cooldowns.mjs'
+import { createModelPark } from './model-park.mjs'
 import {attachEgress,readEgressKey} from './egress.mjs'
 import { rotateEgress, waitForIdle, loadState, loadConfig, planRotate, DEFAULT_CONFIG } from './nord-rotate.mjs'
 
@@ -355,6 +356,14 @@ let nordRotating = false
 let activeTurns = 0
 const NORD_DRAIN_MS = Math.max(0, Number(process.env.CCGW_NORD_DRAIN_MS ?? 15000) || 0)
 let accessDenials = []
+// Model-level refusals ("Model unavailable: opencode/<id>") park a model out of
+// the automatic fallback tail instead of costing a failed turn on every walk
+// (see model-park.mjs). CCGW_MODEL_PARK_MS=0 disables it.
+const modelPark = createModelPark({
+  baseMs: Math.max(0, Number(process.env.CCGW_MODEL_PARK_MS ?? 30 * 60 * 1000) || 0),
+  maxMs: Math.max(0, Number(process.env.CCGW_MODEL_PARK_MAX_MS ?? 6 * 60 * 60 * 1000) || 0),
+  strikes: Math.max(1, Number(process.env.CCGW_MODEL_PARK_STRIKES ?? 2) || 2),
+})
 function poolWideLimited(model) {
   const now = Date.now()
   return (
@@ -573,6 +582,7 @@ async function handleTurn({ dialect, body, req, res }) {
     ranked, model, source: pick.source,
     imageOk: supportsImage, hasFiles: !!canon.files?.length,
     visionTrusted: rankCfg.visionTrusted,
+    exclude: (id) => modelPark.isParked(id),
   })
 
   let stream = null
@@ -729,6 +739,7 @@ async function handleTurn({ dialect, body, req, res }) {
           sid = r.sessionID
           usedModel = activeModel
           markOk(a, activeModel, started)
+          modelPark.noteSuccess(activeModel)
           activeModel = null // success: leave both loops
           break
         }
@@ -788,6 +799,16 @@ async function handleTurn({ dialect, body, req, res }) {
           }
         }
         const modelUnavailable = failure.kind === "upstream"
+        // A model-level refusal ("Model unavailable: opencode/<id>", "Endpoint
+        // is unavailable") is not the account's fault: remember it so the next
+        // automatic chain does not walk into this model again (model-park.mjs).
+        // The head of a chain is never hidden by a park.
+        if (modelUnavailable && !clientGone && isModelLevelRefusal(failMsg)) {
+          const park = modelPark.noteRefusal(activeModel, failMsg)
+          if (park.parked) {
+            logLine({ reqId, phase: "model-park", account: a.name, model: activeModel, seconds: park.seconds, strikes: park.strikes, msg: "upstream refused the model at the model level; parked out of the automatic fallback tail" })
+          }
+        }
         const rotatable = !clientGone && !emitted && attempt < accounts.length - 1 && (limited || down)
         if (rotatable) {
           logLine({ reqId, phase: "rotate", account: a.name, msg: "failed (" + (limited ? "rate limited" : "unreachable") + "), trying next account: " + failMsg.slice(0, 160) })
@@ -950,6 +971,7 @@ const server = http.createServer(async (req, res) => {
         pool: poolState(),
         egress: egress?.state() || null,
         nord: nordStatus(),
+        modelPark: modelPark.snapshot(),
       })
     }
 

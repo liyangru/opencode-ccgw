@@ -14,7 +14,7 @@ const imageOk = (id) => id === "glm-5.3-flash-free" || id === "nemotron-3.5-supe
 // Mirrors the inner/outer loop in server.mjs handleTurn().
 function simulate(scenario, opts = {}) {
   const chain = fallbackChain({
-    ranked, model: opts.model, source: opts.source, imageOk, hasFiles: opts.hasFiles,
+    ranked, model: opts.model, source: opts.source, imageOk, hasFiles: opts.hasFiles, exclude: opts.exclude,
   })
   const modelQueue = [...chain]
   const attempts = []
@@ -99,4 +99,31 @@ assert.equal(r.model, "nemotron-3.5-super-vl-free", "all-cooling on the head mod
 r = simulate(["ok", "ok", "ok"], { model: "glm-5.3-flash-free", source: "slot:opus", cooling: ranked })
 assert.equal(r.error, "cooling", "all models cooling terminates with an error")
 
-console.log("  model-fallback control flow: 7 scenarios ok (drop-on-upstream, terminal 429/403, chain exhaustion, image-safe chain, all-cooling advance/terminate)")
+// Parked models (model-park.mjs): the automatic tail skips them, the chain head
+// is never hidden, and an explicitly requested model is still attempted.
+const parked = new Set(["beam-free", "space-bunny-free"])
+const exclude = (id) => parked.has(id)
+assert.deepEqual(
+  fallbackChain({ ranked, model: "glm-5.3-flash-free", source: "slot:opus", imageOk, exclude }),
+  ["glm-5.3-flash-free", "nemotron-3.5-super-vl-free"],
+  "parked models are skipped in the tail",
+)
+assert.deepEqual(
+  fallbackChain({ ranked, model: "glm-5.3-flash-free", source: "slot:opus", imageOk, exclude: () => true }),
+  ["glm-5.3-flash-free"],
+  "an all-parked tail keeps the head instead of leaving an empty chain",
+)
+assert.deepEqual(
+  fallbackChain({ ranked, model: "beam-free", source: "requested", imageOk, exclude }),
+  ["beam-free"],
+  "an explicitly requested parked model is still attempted",
+)
+assert.deepEqual(
+  fallbackChain({ ranked, model: "glm-5.3-flash-free", source: "slot:opus", imageOk, hasFiles: true, exclude }),
+  ["glm-5.3-flash-free", "nemotron-3.5-super-vl-free"],
+  "image chains keep their vision-safe tail rule with parks applied",
+)
+r = simulate(["fail-upstream", "ok", "ok"], { model: "glm-5.3-flash-free", source: "slot:opus", exclude: () => true })
+assert.equal(r.error, "upstream-failed-last", "a one-model chain (every other model parked) fails cleanly instead of spinning or walking the chain")
+
+console.log("  model-fallback control flow: 12 checks ok (drop-on-upstream, terminal 429/403, chain exhaustion, image-safe chain, all-cooling advance/terminate, parked-tail skip, head kept, explicit request kept, one-model chain no-spin)")

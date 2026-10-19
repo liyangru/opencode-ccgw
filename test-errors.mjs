@@ -7,7 +7,7 @@ import os from "node:os"
 import path from "node:path"
 import { spawn } from "node:child_process"
 import { fileURLToPath } from "node:url"
-import { classifyError } from "./errors.mjs"
+import { classifyError, isModelLevelRefusal } from "./errors.mjs"
 
 const root = path.dirname(fileURLToPath(import.meta.url))
 const denied = "OpenCode's free tier can only be used from within OpenCode. Download it at https://opencode.ai and keep building."
@@ -514,4 +514,17 @@ test("a control-plane failure on every account fails without walking models", as
     assert.equal(f.turns(), 0, "no model was prompted")
     assert.ok(!f.log().includes('"phase":"model-fallback"'), "the model chain was not walked")
   }, { pluginFailure: () => 500 })
+})
+
+// The upstream reports a dead model with more than one wording (measured live:
+// "Model unavailable: opencode/<id>" and "Model <id> has been deprecated.").
+// model-park.mjs counts strikes from these texts, so both shapes must match.
+test("model-level refusal shapes are recognized; request/geo errors are not", () => {
+  assert.equal(isModelLevelRefusal("Model unavailable: opencode/muse-spark-1.3-contributor-free"), true)
+  assert.equal(isModelLevelRefusal("Model muse-spark-1.3-contributor-free has been deprecated."), true)
+  assert.equal(isModelLevelRefusal("Upstream request failed: Endpoint is unavailable."), true)
+  assert.equal(isModelLevelRefusal("所选模型不支持图片，请选择支持图片的模型：glm-5.3-flash-free"), false)
+  assert.equal(isModelLevelRefusal("Invalid value for 'tools': maximum number of items is 128."), false)
+  assert.equal(isModelLevelRefusal("This model is not available in your country"), false)
+  assert.equal(isModelLevelRefusal("opencode/muse-spark-1.3-contributor-free"), false)
 })
