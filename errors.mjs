@@ -7,6 +7,14 @@ const NETWORK = /fetch failed|ECONNREFUSED|ECONNRESET|socket hang up|EHOSTUNREAC
 // That is a request-parameter problem (max_tokens too small), not a model or
 // account failure: it must not rotate accounts or walk the fallback chain.
 const OUTPUT_LIMIT = /still truncated|output token limit/i
+// A per-model geo restriction ("This model is not available in your country")
+// says nothing about the caller's credentials: the same key runs every other
+// model, and this one from other networks. It is a model-level refusal, so it
+// must walk the ranked fallback chain like "Endpoint is unavailable". It is
+// NOT the terminal admission gate - the network-level gates (free tier app
+// check, abusive-traffic IP block) stay access_denied and keep feeding the
+// egress rotator.
+const GEO_BLOCKED = /not available in your (?:country|region)|not (?:supported|allowed|offered) in your (?:country|region)|(?:geo|region)[- ]?(?:restricted|blocked)/i
 
 function retryAfter(error) {
   if (Number.isFinite(error?.retryAfterMs) && error.retryAfterMs > 0) return error.retryAfterMs / 1000
@@ -31,8 +39,9 @@ export function classifyError(error) {
   const freeTier = /FreeTierError/i.test(providerType) || /free tier can only be used from within OpenCode/i.test(message)
   const outputLimit = OUTPUT_LIMIT.test(message)
   const status = outputLimit ? 400 : explicitStatus ?? (freeTier ? 403 : RATE_LIMIT.test(message) ? 429 : 502)
-  const kind = outputLimit ? "request" : status === 401 ? "authentication" : status === 403 ? "access_denied" : status === 429 ? "rate_limit" : NETWORK.test(message) ? "network" : "upstream"
-  const code = outputLimit ? "output_limit" : freeTier && status === 403 ? "free_tier_access_denied" : kind === "authentication" ? "authentication_error" : kind === "access_denied" ? "access_denied" : kind === "rate_limit" ? "rate_limit_exceeded" : "upstream_error"
+  const geoBlocked = status === 403 && GEO_BLOCKED.test(message)
+  const kind = outputLimit ? "request" : status === 401 ? "authentication" : geoBlocked ? "upstream" : status === 403 ? "access_denied" : status === 429 ? "rate_limit" : NETWORK.test(message) ? "network" : "upstream"
+  const code = outputLimit ? "output_limit" : geoBlocked ? "model_geo_blocked" : freeTier && status === 403 ? "free_tier_access_denied" : kind === "authentication" ? "authentication_error" : kind === "access_denied" ? "access_denied" : kind === "rate_limit" ? "rate_limit_exceeded" : "upstream_error"
   const type = outputLimit ? "invalid_request_error" : kind === "authentication" ? "authentication_error" : kind === "access_denied" ? "permission_error" : kind === "rate_limit" ? "rate_limit_error" : "api_error"
   return { message, status, kind, code, type, retryAfterSeconds: retryAfter(error) }
 }

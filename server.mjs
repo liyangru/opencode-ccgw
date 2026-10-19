@@ -59,7 +59,7 @@ import { describeRanked, fallbackChain as fallbackChainFn, isFreeModel, loadRank
 import { classifyError } from "./errors.mjs"
 import { loadCooldowns, saveCooldowns } from './cooldowns.mjs'
 import {attachEgress,readEgressKey} from './egress.mjs'
-import { rotateEgress } from './nord-rotate.mjs'
+import { rotateEgress, waitForIdle } from './nord-rotate.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -97,6 +97,10 @@ installGatewayPlugin(SCRATCH)
 const ACCOUNTS_FILE = process.env.CCGW_ACCOUNTS_FILE || ""
 const COOLDOWN_SECONDS = Number(process.env.CCGW_COOLDOWN_SECONDS || 300)
 const DOWN_COOLDOWN_SECONDS = Number(process.env.CCGW_DOWN_COOLDOWN_SECONDS || 30)
+// A geo-blocked model is refused for this exit region only; a short cooldown
+// keeps sibling requests from re-hitting the same wall while the egress
+// rotator looks for a region where the model is served.
+const GEO_COOLDOWN_SECONDS = Number(process.env.CCGW_GEO_COOLDOWN_SECONDS || 180)
 
 function loadAccounts() {
   if (ACCOUNTS_FILE && fs.existsSync(ACCOUNTS_FILE)) {
@@ -345,6 +349,11 @@ function notePoolState() {
 // file); this file only decides when the signal is real.
 
 let nordRotating = false
+// How many turns are talking to upstream right now. A Nord disconnect tears
+// down the tunnel under every one of them, so a rotation waits for the others
+// to finish (bounded by CCGW_NORD_DRAIN_MS) instead of cutting a live stream.
+let activeTurns = 0
+const NORD_DRAIN_MS = Math.max(0, Number(process.env.CCGW_NORD_DRAIN_MS ?? 15000) || 0)
 let accessDenials = []
 function poolWideLimited(model) {
   const now = Date.now()
@@ -362,22 +371,34 @@ function rotateEgressAndReset(reason) {
   // unreachable) are left alone - they are unrelated to the exit IP.
   if (nordRotating) return Promise.resolve({ rotated: false, reason: "in-flight" })
   nordRotating = true
-  return rotateEgress({ reason, log: (evt, msg) => logLine({ phase: "nord-rotate", event: evt, msg }) })
-    .then((r) => {
-      if (!r?.rotated) return r
-      let cleared = 0
-      for (const a of accounts) {
-        cleared += a.rateLimits.size
-        a.rateLimits.clear()
-      }
-      accessDenials = []
-      if (cleared) {
-        notePoolState()
-        persistCooldowns()
-      }
-      logLine({ phase: "nord-rotate", event: "cooldowns-cleared", reason, group: r.group || null, ip: r.ip || null, cleared, msg: "new exit IP; local rate-limit cooldowns cleared so the next request retries immediately" })
-      return r
-    })
+  return (async () => {
+    // This request counts as one active turn; anything above that is another
+    // turn whose upstream socket would die with the tunnel. Wait for it, and
+    // if it does not finish in time, skip the rotation entirely rather than
+    // cutting a live (possibly streaming) response. The next request retries.
+    const drain = await waitForIdle(() => activeTurns, { idleAt: 1, timeoutMs: NORD_DRAIN_MS })
+    if (!drain.drained) {
+      logLine({ phase: "nord-rotate", event: "deferred", reason, activeTurns, waitedMs: drain.waitedMs, msg: "other turns are still running; rotation skipped so their upstream connection is not cut" })
+      return { rotated: false, reason: "busy" }
+    }
+    if (drain.waitedMs > 0) {
+      logLine({ phase: "nord-rotate", event: "drained", reason, waitedMs: drain.waitedMs, msg: "waited for in-flight turns before rotating the exit" })
+    }
+    const r = await rotateEgress({ reason, log: (evt, msg) => logLine({ phase: "nord-rotate", event: evt, msg }) })
+    if (!r?.rotated) return r
+    let cleared = 0
+    for (const a of accounts) {
+      cleared += a.rateLimits.size
+      a.rateLimits.clear()
+    }
+    accessDenials = []
+    if (cleared) {
+      notePoolState()
+      persistCooldowns()
+    }
+    logLine({ phase: "nord-rotate", event: "cooldowns-cleared", reason, group: r.group || null, ip: r.ip || null, cleared, msg: "new exit IP; local rate-limit cooldowns cleared so the next request retries immediately" })
+    return r
+  })()
     .catch((e) => {
       logLine({ phase: "nord-rotate", event: "error", reason, msg: String(e?.message || e) })
       return { rotated: false, reason: "error" }
@@ -578,7 +599,15 @@ async function handleTurn({ dialect, body, req, res }) {
   let outputBudget = canon.maxOutputTokens ? Math.max(Number(canon.maxOutputTokens) || 0, MIN_OUTPUT_BUDGET) : undefined
   let outputRetries = 0
   try {
+    // A rotation replaces the tunnel under new connections too; wait for an
+    // in-progress rotation to settle before dialing upstream (bounded so a
+    // hung rotation cannot pin the request forever).
+    for (let i = 0; nordRotating && i < 150; i++) {
+      if (ac.signal.aborted) throw new Error("Client disconnected")
+      await sleep(200)
+    }
     await sem.acquire()
+    activeTurns++
     try {
       // Outer loop: the model actually used may move down the fallback chain
       // when the upstream reports a model as unavailable.
@@ -706,12 +735,18 @@ async function handleTurn({ dialect, body, req, res }) {
           else if (down) coolDown(a, "unreachable: " + failMsg.slice(0, 160), DOWN_COOLDOWN_SECONDS)
           else {
             // Admission/authentication refusals are not evidence of exhausted quota.
+            if (failure.code === "model_geo_blocked") {
+              // Geo-restricted from the current exit: park this model briefly
+              // and let the model-level chain walk on to the next ranked model.
+              coolDown(a, "geo-blocked: " + failMsg.slice(0, 160), GEO_COOLDOWN_SECONDS, activeModel, failure.retryAfterSeconds)
+            }
             a.lastError = failMsg.slice(0, 160)
             a.lastLimited = false
             notePoolState()
-            // A refusal storm ("can only be used from within OpenCode") is an
-            // IP-level gate: rotate nodes in the background once it repeats.
-            if (failure.kind === "access_denied") {
+            // A refusal storm ("can only be used from within OpenCode", "not
+            // available in your country") is an IP-level gate: rotate nodes in
+            // the background once it repeats.
+            if (failure.kind === "access_denied" || failure.code === "model_geo_blocked") {
               const now = Date.now()
               accessDenials = accessDenials.filter((t) => now - t < 600_000)
               accessDenials.push(now)
@@ -763,6 +798,7 @@ async function handleTurn({ dialect, body, req, res }) {
         if (activeModel === null || error) break
       }
     } finally {
+      activeTurns--
       sem.release()
     }
     // Dispatcher calls stand for client tools that were not registered

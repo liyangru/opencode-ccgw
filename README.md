@@ -127,6 +127,7 @@ Stop-ScheduledTask ccgw-gateway -ErrorAction SilentlyContinue; Start-ScheduledTa
 - 动作:调用 `node zero-window\nord-cli.ps1 rotate` → 断开当前 Nord 节点 → 按 `zero-window\nord-rotate.groups` 的顺序连接下一个国家(实测每组约 7–25 秒)→ 输出 `rotate: OK group=<国家> ip=<出口 IP>`。
 - 换节点成功后清空**模型级**限流冷却(它们记录在旧出口 IP 上),保留实例失联类的冷却;当前请求会用新出口对同一模型重试一次(先等 2 秒让隧道稳定),客户端看到的是成功而不是 429。
 - 护栏:最短间隔 `CCGW_NORD_MIN_INTERVAL_SEC`(默认 120 秒);`CCGW_NORD_MAX_PER_HOUR`(默认 6 次/小时,只统计成功轮换);`CCGW_NORD_ROTATE=off` 整体关闭;`=stub` 为测试模式(只记录、不动网络)。审计状态在 `ccgw\nord-rotate.state.json`,事件日志 `phase:"nord-rotate"`。
+- 不打断进行中的回合:换节点前先等**其他正在跑的请求**结束(最多 `CCGW_NORD_DRAIN_MS`,默认 15 秒)。Nord 一断开会连带掐断所有复用隧道的连接,所以超时就先不换(当前请求按 429/降级继续),等下一个请求再试;新请求遇到正在轮换也会等它落定再连上游。
 - 国家可用性(同一免费池实测):韩国、美国四槽全通;香港对部分模型返回 `This model is not available in your country`;荷兰曾遇 `Endpoint is unavailable`(上游瞬时)。默认顺序已把实测可用的国家排在前面,可直接编辑 `nord-rotate.groups` 调整。
 - 手动操作:`node nord-rotate.mjs`(遵守护栏)、`node nord-rotate.mjs --dry-run`(只看决策)、`node nord-rotate.mjs --force`(忽略护栏)、`.\zero-window\nord-cli.ps1 status|rotate`。
 
@@ -409,6 +410,7 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 | `CCGW_NORD_ROTATE` | `on` | Nord 节点自动轮换:`off` 关闭,`stub` 只记录决策不换网(测试用) |
 | `CCGW_NORD_MIN_INTERVAL_SEC` | `120` | 两次节点轮换的最短间隔(秒) |
 | `CCGW_NORD_MAX_PER_HOUR` | `6` | 每小时成功轮换次数上限 |
+| `CCGW_NORD_DRAIN_MS` | `15000` | 换节点前等待其他进行中回合结束的上限;超时跳过本次轮换(避免掐断流式响应) |
 | `CCGW_NORD_STATE` | `nord-rotate.state.json`（网关目录） | 轮换审计状态文件(测试可指向临时目录) |
 
 ## 验证与日志

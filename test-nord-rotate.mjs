@@ -7,7 +7,7 @@ import { test } from "node:test"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { planRotate, rotateEgress, loadState, saveState, DEFAULT_CONFIG } from "./nord-rotate.mjs"
+import { planRotate, rotateEgress, loadState, saveState, waitForIdle, DEFAULT_CONFIG } from "./nord-rotate.mjs"
 
 const cfg = { ...DEFAULT_CONFIG }
 const tmpState = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), "ccgw-nord-")), "state.json")
@@ -102,6 +102,26 @@ test("CCGW_NORD_ROTATE=off disables the automatic path", async () => {
     if (previous === undefined) delete process.env.CCGW_NORD_ROTATE
     else process.env.CCGW_NORD_ROTATE = previous
   }
+})
+
+test("waitForIdle returns once the other turns finish", async () => {
+  const seq = [3, 2, 1]
+  let i = 0
+  const r = await waitForIdle(() => seq[Math.min(i++, seq.length - 1)], { idleAt: 1, timeoutMs: 10_000, intervalMs: 0, sleep: async () => {} })
+  assert.equal(r.drained, true)
+  assert.ok(i >= 2)
+})
+
+test("waitForIdle reports a timeout instead of forcing the rotation", async () => {
+  let calls = 0
+  const r = await waitForIdle(() => { calls++; return 4 }, { idleAt: 1, timeoutMs: 0, intervalMs: 0, sleep: async () => {} })
+  assert.equal(r.drained, false)
+  assert.ok(calls >= 1)
+})
+
+test("waitForIdle skips waiting when the caller is alone", async () => {
+  const r = await waitForIdle(() => 1, { idleAt: 1, timeoutMs: 0 })
+  assert.equal(r.drained, true)
 })
 
 test("state file trimming keeps the newest events", () => {

@@ -78,6 +78,21 @@ export function planRotate(state, now, cfg = DEFAULT_CONFIG, force = false) {
   return { ok: true }
 }
 
+// Wait until only `idleAt` turns are still running (the caller itself). A Nord
+// disconnect tears down the tunnel that every in-flight upstream connection is
+// using, so a rotation must not start while another turn is streaming. Exported
+// for tests; `sleep` is injectable so the tests stay instant.
+export async function waitForIdle(activeCount, opts = {}) {
+  const { idleAt = 1, timeoutMs = 15000, intervalMs = 250, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = opts
+  const t0 = Date.now()
+  for (;;) {
+    if (activeCount() <= idleAt) return { drained: true, waitedMs: Date.now() - t0 }
+    const left = timeoutMs - (Date.now() - t0)
+    if (left <= 0) return { drained: false, waitedMs: Date.now() - t0 }
+    await sleep(Math.min(intervalMs, left))
+  }
+}
+
 // Run zero-window\nord-cli.ps1 rotate and parse its one-line verdict.
 export function runRotateScript(timeoutMs = DEFAULT_CONFIG.timeoutMs) {
   return new Promise((resolve) => {
