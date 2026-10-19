@@ -38,7 +38,12 @@ export async function ensureGatewayPlugin(oc, dir, { timeoutMs = 30000 } = {}) {
   // well; allow a bounded 30 seconds for local setup, without invoking inference
   // or skipping the output-budget/retry guard if activation fails.
   do {
-    const result = await oc.reqOrThrow("GET", "/api/plugin?" + query)
+    const remaining = deadline - Date.now()
+    // One hung control-plane call must not eat the whole readiness budget: cap
+    // each probe (a cold location that is merely slow still answers the list
+    // call quickly) and let a timeout surface as a control-plane failure, so the
+    // gateway cools that account and fails over instead of walking models.
+    const result = await oc.reqOrThrow("GET", "/api/plugin?" + query, undefined, { timeoutMs: Math.max(1000, Math.min(8000, remaining)) })
     const plugin = result?.data?.find(x => x.id === GATEWAY_PLUGIN_ID)
     if (plugin?.state?.status === "active") return
     if (plugin?.state?.status === "failed" || Date.now() >= deadline) break
@@ -141,8 +146,8 @@ export class OpenCode {
     }
   }
 
-  async reqOrThrow(method, p, body) {
-    const r = await this.req(method, p, body)
+  async reqOrThrow(method, p, body, opts) {
+    const r = await this.req(method, p, body, opts)
     if (!r.ok) throw Object.assign(new Error(`${method} ${p} -> ${r.status} ${r.text.slice(0, 300)}`), {
       status: r.status, response: { body: r.text, headers: r.headers },
     })

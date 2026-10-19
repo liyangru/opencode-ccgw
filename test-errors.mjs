@@ -7,6 +7,7 @@ import os from "node:os"
 import path from "node:path"
 import { spawn } from "node:child_process"
 import { fileURLToPath } from "node:url"
+import { classifyError } from "./errors.mjs"
 
 const root = path.dirname(fileURLToPath(import.meta.url))
 const denied = "OpenCode's free tier can only be used from within OpenCode. Download it at https://opencode.ai and keep building."
@@ -43,6 +44,8 @@ async function fixture(error, run, options = {}) {
     } else if (route === "/api/model") {
       json({ data: (options.models || ["deepseek-v4.1-flash-free"]).map((id) => ({ id, providerID: "opencode", enabled: true, cost: [{ input: 0, output: 0 }] })).concat(options.extraModels || []) })
     } else if (route === "/api/plugin") {
+      const fail = options.pluginFailure ? options.pluginFailure({ account, turn: turns }) : null
+      if (fail) { res.writeHead(fail, { "content-type": "application/json" }); res.end(JSON.stringify({ error: { message: "fixture plugin failure" } })); return }
       json({ data: [{ id: 'ccgw-output-budget-v1', state: { status: 'active' } }] })
     } else if (req.method === "POST" && route === "/api/session") {
       const chunks = []
@@ -468,4 +471,47 @@ test("a rotation is deferred while another turn is still running", async () => {
     assert.ok(log.includes('"phase":"nord-rotate","event":"deferred"'), "rotation deferred for the running turn")
     assert.ok(!log.includes('"event":"rotated"'), "no node change while a turn was running")
   }, { cooldown: 30, models: ["deepseek-v4.1-flash-free", "big-pickle"], delay: ({ model }) => model === "big-pickle" ? 700 : 5, env: { CCGW_NORD_ROTATE: "stub", CCGW_NORD_DRAIN_MS: "0" } })
+})
+
+// ---------------------------------------------------------------------------
+// Control-plane failures (the gateway's own OpenCode calls: plugin readiness,
+// session create, prompt) are account-level, not model-level: they must never
+// spend the ranked model chain.
+
+test("control-plane failures classify as account-level network errors", () => {
+  const timeout = classifyError(new Error("OpenCode GET /api/plugin?location%5Bdirectory%5D=D%3A%5CTemp%5Cccgw-scratch timed out after 30000ms"))
+  assert.equal(timeout.kind, "network")
+  assert.equal(timeout.code, "control_plane_error")
+  const refused = classifyError(Object.assign(new Error("GET /api/plugin?location%5Bdirectory%5D=x -> 500 fixture plugin failure"), { status: 500, response: { body: "{}", headers: {} } }))
+  assert.equal(refused.kind, "network")
+  assert.equal(refused.code, "control_plane_error")
+  const plugin = classifyError(Object.assign(new Error("Gateway session plugin is not active; output budgets and retry ownership cannot be enforced."), { status: 503, code: "gateway_plugin_unavailable" }))
+  assert.equal(plugin.kind, "network")
+  assert.equal(plugin.code, "control_plane_error")
+  assert.equal(plugin.status, 503)
+  // A model-level geo refusal keeps its own classification (precedence guard).
+  const geo = classifyError(Object.assign(new Error("This model is not available in your country"), { status: 403 }))
+  assert.equal(geo.kind, "upstream")
+  assert.equal(geo.code, "model_geo_blocked")
+})
+
+test("a control-plane failure on one account fails over instead of walking models", async () => {
+  await fixture(null, async (f) => {
+    const r = await f.post("/v1/chat/completions", body)
+    assert.equal(r.status, 200)
+    assert.equal(f.turns(), 1)
+    assert.deepEqual(f.hits().map((h) => h.account), ["b"], "the healthy account served on the same model")
+    const log = f.log()
+    assert.ok(log.includes('"phase":"rotate"'), "the broken account was rotated out")
+    assert.ok(!log.includes('"phase":"model-fallback"'), "the model chain was not walked")
+  }, { pluginFailure: ({ account }) => account === "a" ? 500 : null })
+})
+
+test("a control-plane failure on every account fails without walking models", async () => {
+  await fixture(null, async (f) => {
+    const r = await f.post("/v1/chat/completions", body)
+    assert.equal(r.status, 500)
+    assert.equal(f.turns(), 0, "no model was prompted")
+    assert.ok(!f.log().includes('"phase":"model-fallback"'), "the model chain was not walked")
+  }, { pluginFailure: () => 500 })
 })

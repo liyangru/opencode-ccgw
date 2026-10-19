@@ -556,4 +556,12 @@ image_url 报错源于旧协议适配器主动拒绝图片。新增三协议内�
 - `net-guard`（backend=nord）用 `-Once -ForceQuota` 实测：识别到 Nord 适配器已连接后只记 `already on alternate egress ... (no action)`，不重复换网。
 - 本套件计数：`test-errors.mjs` 30 项、`test-nord-rotate.mjs` 15 项；`test-all.cmd` 全绿。
 
+## 2026-10-19：控制面失败不再当成“模型被拒”
+
+实测一次 `claude-sonnet-5` 请求耗时 **100 秒**才返回，日志里是 `phase:"model-fallback" … upstream refused the model (OpenCode GET /api/plugin?location[directory]=… timed out after 30000ms), trying next ranked model`：网关自己的 OpenCode 控制面（插件就绪检查）超时，被分类成 `upstream`，于是**烧掉了模型降级链**（`deepseek` → `beam-free`）并让用户多等 30 秒。
+
+- `errors.mjs` 新增控制面规则：`OpenCode <METHOD> <path> timed out after Nms`、`<METHOD> /api/… -> 5xx …`、`Gateway session plugin is not active` 全部归类为 **`kind:"network"`、`code:"control_plane_error"`**（账户/出口维度，不是模型维度）。效果：该账户短暂冷却、请求立刻换另一个账户，**不再走模型降级链**，客户端拿到的仍是原始控制面错误（5xx），全账户都失败时如实返回。
+- `engine.mjs` 的插件就绪探测每次调用最多 8 秒（`min(8000, 剩余预算)`，下限 1 秒），一次挂死的控制面调用不再吃掉整个 30 秒就绪预算；插件**不活跃仍然 fail closed**（`gateway_plugin_unavailable`），只是失败得更快、更准。
+- 回归：`test-errors.mjs` 新增 3 项——控制面错误的分类（三种消息形态 + 与 geo/403 的优先级），单账户控制面 500 时换账户且同模型成功（日志有 `phase:"rotate"`、无 `model-fallback`），全部账户控制面 500 时返回 5xx 且**一个模型都没被调用**（`turns:0`）。
+
 
