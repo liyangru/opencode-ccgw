@@ -418,7 +418,7 @@ node make-ccswitch-links.mjs   # 生成 ccswitch-links.txt(Claude Code / Codex �
 - `node smoke1.mjs` — 引擎冒烟(文本回合 + 工具捕获/中断)。
 - `node test-formats.mjs [anthropic|openai|responses|real]` — 全链路验收:三协议 ×(非流式 / 流式 / 工具往返),外加 `real` 组:模拟客户端**真实读取文件、真实执行命令**(输出含一次性 token,最终回答必须包含它们)。
 - `node test-ranking.mjs` — 免费模型识别 / 排名 / 自动选优自检。
-- `node --test test-errors.mjs test-protocol-regressions.mjs test-cooldowns.mjs test-budget.mjs test-images.mjs test-toolnames.mjs test-nord-rotate.mjs test-egress.mjs test-cancel.mjs test-plugin-readiness.mjs test-silent-node.mjs test-direct-ipv6.mjs test-request-timeout.mjs` — 本地模拟回归(共 14 个套件,全部不调用真实上游):错误分类、输出预算、协议输入、冷却恢复、受管会话插件、内嵌图片、上游工具上限(名称 64 / 数量 128 / 分发器)、Nord 轮换护栏、IPv6 出口 CONNECT、取消传播、插件就绪、GUI 子系统 node、原生 IPv6 直连、控制面请求超时。
+- `node --test test-errors.mjs test-protocol-regressions.mjs test-cooldowns.mjs test-budget.mjs test-images.mjs test-toolnames.mjs test-nord-rotate.mjs test-egress.mjs test-cancel.mjs test-plugin-readiness.mjs test-silent-node.mjs test-direct-ipv6.mjs test-request-timeout.mjs test-geo-fallback.mjs` — 本地模拟回归(共 15 个套件,全部不调用真实上游):错误分类、输出预算、协议输入、冷却恢复、受管会话插件、内嵌图片、上游工具上限(名称 64 / 数量 128 / 分发器)、Nord 轮换护栏、IPv6 出口 CONNECT、取消传播、插件就绪、GUI 子系统 node、原生 IPv6 直连、控制面请求超时、模型国家限制降级。
 - `test-all.cmd` — 一键跑上面全部离线回归 + `test-ranking.mjs`;只看退出码(0 = 全绿)。
 - `node verify-live.mjs` — 对运行中的网关做健康 + 文本 + 工具往返快速验证。
 - `ccgw.log` — 每请求一行 JSON,路由证明 = `sessionID`(可在 OpenCode 桌面版里打开对应会话)。
